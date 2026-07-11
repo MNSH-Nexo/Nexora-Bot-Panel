@@ -1,0 +1,1696 @@
+#!/usr/bin/env bash
+# ============================================================
+#  nexo-bot — Nexora VPN Bot Management CLI v2.0
+#  Usage: nexo-bot
+#  Built by MNSH-Nexo — https://github.com/MNSH-Nexo
+# ============================================================
+
+set -uo pipefail
+
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+BOT_DIR="$(dirname "$SCRIPT_PATH")"
+ENV_FILE="$BOT_DIR/.env"
+COMPOSE_FILE="$BOT_DIR/docker-compose.yml"
+
+PANEL_SYSTEMD_SERVICE="nexora-panel"
+PANEL_DIR="/opt/nexora-panel"
+PANEL_ENV_LOCAL="$PANEL_DIR/.env.local"
+PANEL_ENV_KEY_ENABLED="WEB_PANEL_ENABLED"
+PANEL_ENV_KEY_PATH="WEB_PANEL_PATH"
+PANEL_ENV_KEY_USER="WEB_PANEL_USER"
+PANEL_ENV_KEY_PASS="WEB_PANEL_PASS"
+PANEL_ENV_KEY_PORT="WEB_PANEL_PORT"
+
+# ── Colors ────────────────────────────────────────────────────
+RED='\033[0;31m';    GREEN='\033[0;32m';  YELLOW='\033[1;33m'
+BLUE='\033[0;34m';   CYAN='\033[0;36m';  BOLD='\033[1m'
+DIM='\033[2m';       RESET='\033[0m'
+
+_use_postgres() {
+  [[ -f "$ENV_FILE" ]] && grep -q "^USE_POSTGRES=true" "$ENV_FILE"
+}
+
+_dc() {
+  if _use_postgres; then
+    docker compose -f "$COMPOSE_FILE" --profile postgres "$@"
+  else
+    docker compose -f "$COMPOSE_FILE" "$@"
+  fi
+}
+
+_banner() {
+  clear
+  echo -e "${CYAN}${BOLD}"
+  echo "  ███╗   ██╗███████╗██╗  ██╗ ██████╗ ██████╗  █████╗ "
+  echo "  ████╗  ██║██╔════╝╚██╗██╔╝██╔═══██╗██╔══██╗██╔══██╗"
+  echo "  ██╔██╗ ██║█████╗   ╚███╔╝ ██║   ██║██████╔╝███████║"
+  echo "  ██║╚██╗██║██╔══╝   ██╔██╗ ██║   ██║██╔══██╗██╔══██║"
+  echo "  ██║ ╚████║███████╗██╔╝ ██╗╚██████╔╝██║  ██║██║  ██║"
+  echo "  ╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝"
+  echo -e "${RESET}${DIM}                 VPN Bot Management CLI v2.0${RESET}"
+  echo -e "${DIM}         Built by MNSH-Nexo · github.com/MNSH-Nexo${RESET}"
+  echo ""
+  echo -e "  ${DIM}┌─────────────────────────────────────────────────┐${RESET}"
+  echo -e "  ${DIM}│${RESET}  ${YELLOW}☕ Donate (TRX / TRC20)${RESET}                          ${DIM}│${RESET}"
+  echo -e "  ${DIM}│${RESET}  ${CYAN}TGzhHsfta8MdMPNzpexnqFCUiux7T1H5Ng${RESET}          ${DIM}│${RESET}"
+  echo -e "  ${DIM}└─────────────────────────────────────────────────┘${RESET}"
+  echo ""
+}
+
+_line()  { echo -e "${DIM}────────────────────────────────────────────────────${RESET}"; }
+_ok()    { echo -e "  ${GREEN}✔${RESET}  $*"; }
+_warn()  { echo -e "  ${YELLOW}⚠${RESET}  $*"; }
+_err()   { echo -e "  ${RED}✘${RESET}  $*"; }
+_info()  { echo -e "  ${CYAN}ℹ${RESET}  $*"; }
+_press() { echo -e "\n${DIM}  Press Enter to continue...${RESET}"; read -r; }
+
+_require_compose() {
+  if [[ ! -f "$COMPOSE_FILE" ]]; then
+    _err "docker-compose.yml not found in: $BOT_DIR"; _press; return 1
+  fi
+}
+
+# ── خواندن یک مقدار از هر فایل .env ──────────────────────────
+_env_read() {
+  local file="$1" key="$2" default="${3:-}"
+  [[ -f "$file" ]] || { echo "$default"; return; }
+  local val; val=$(grep "^${key}=" "$file" 2>/dev/null | cut -d= -f2- | tr -d '"' || true)
+  echo "${val:-$default}"
+}
+
+# ── نوشتن/بروزرسانی یک کلید در فایل .env ─────────────────────
+_env_set() {
+  local key="$1" val="$2" file="${3:-$ENV_FILE}"
+  if grep -q "^${key}=" "$file" 2>/dev/null; then
+    sed -i "s|^${key}=.*|${key}=${val}|" "$file"
+  else
+    echo "${key}=${val}" >> "$file"
+  fi
+}
+
+# ── وضعیت ربات ────────────────────────────────────────────────
+_status_bar() {
+  local bot_status
+  if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "nexora_bot"; then
+    bot_status="${GREEN}● Running${RESET}"
+  else
+    bot_status="${RED}● Stopped${RESET}"
+  fi
+  if _use_postgres; then
+    local db_status
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "nexora_postgres"; then
+      db_status="${GREEN}● Running${RESET}"
+    else
+      db_status="${YELLOW}● Stopped${RESET}"
+    fi
+    echo -e "  Bot: $bot_status    DB (PostgreSQL): $db_status"
+  else
+    echo -e "  Bot: $bot_status    DB: ${DIM}SQLite${RESET}"
+  fi
+}
+
+# ── وضعیت وب‌پنل (از .env.local پنل — نه .env ربات) ───────────
+_panel_status() {
+  local _enabled _path _port _user _svc_status
+
+  # اول .env.local پنل، اگه نبود .env ربات
+  if [[ -f "$PANEL_ENV_LOCAL" ]]; then
+    _enabled=$(_env_read "$PANEL_ENV_LOCAL" "WEB_PANEL_ENABLED" "false")
+    _path=$(_env_read "$PANEL_ENV_LOCAL" "WEB_PANEL_PATH" "/nexora")
+    _port=$(_env_read "$PANEL_ENV_LOCAL" "WEB_PANEL_PORT" "3000")
+    _user=$(_env_read "$PANEL_ENV_LOCAL" "WEB_PANEL_USER" "admin")
+  else
+    _enabled=$(_env_read "$ENV_FILE" "WEB_PANEL_ENABLED" "false")
+    _path=$(_env_read "$ENV_FILE" "WEB_PANEL_PATH" "/nexora")
+    _port=$(_env_read "$ENV_FILE" "WEB_PANEL_PORT" "3000")
+    _user=$(_env_read "$ENV_FILE" "WEB_PANEL_USER" "admin")
+  fi
+
+  if systemctl is-active "$PANEL_SYSTEMD_SERVICE" &>/dev/null; then
+    _svc_status="${GREEN}● Running${RESET}"
+  elif [[ "$_enabled" == "true" ]]; then
+    _svc_status="${YELLOW}● Stopped${RESET}"
+  else
+    _svc_status="${RED}● Disabled${RESET}"
+  fi
+
+  if [[ "$_enabled" == "true" ]]; then
+    echo -e "  Panel: $_svc_status    Path: ${CYAN}${_path}${RESET}    Port: ${CYAN}${_port}${RESET}    User: ${CYAN}${_user}${RESET}"
+  else
+    echo -e "  Panel: $_svc_status"
+  fi
+}
+
+_panel_is_enabled() {
+  if [[ -f "$PANEL_ENV_LOCAL" ]]; then
+    grep -q "^WEB_PANEL_ENABLED=true" "$PANEL_ENV_LOCAL" 2>/dev/null
+  else
+    [[ -f "$ENV_FILE" ]] && grep -q "^${PANEL_ENV_KEY_ENABLED}=true" "$ENV_FILE"
+  fi
+}
+
+# ── یافتن مسیر SQLite DB ──────────────────────────────────────
+_find_sqlite_db() {
+  local candidates=(
+    "/var/lib/docker/volumes/nexora_bot_data/_data/bot_data.db"
+    "/opt/nexora-bot/data/bot_data.db"
+    "$BOT_DIR/bot_data.db"
+  )
+  for p in "${candidates[@]}"; do
+    [[ -f "$p" ]] && { echo "$p"; return; }
+  done
+  # جستجو در docker volume
+  local vol_path; vol_path=$(docker volume inspect nexora_bot_data \
+    --format '{{.Mountpoint}}' 2>/dev/null || echo "")
+  [[ -n "$vol_path" && -f "$vol_path/bot_data.db" ]] && echo "$vol_path/bot_data.db"
+}
+
+# ── اجرای SQL روی SQLite DB داخل Docker volume ────────────────
+_sqlite_exec() {
+  local sql="$1"
+  local db_path; db_path=$(_find_sqlite_db)
+  if [[ -z "$db_path" ]]; then
+    _err "SQLite DB not found. Start the bot first."; return 1
+  fi
+  # اگه sqlite3 نصب باشه مستقیم اجرا کن
+  if command -v sqlite3 &>/dev/null; then
+    sqlite3 "$db_path" "$sql"
+  elif command -v docker &>/dev/null; then
+    # از طریق container ربات
+    docker exec nexora_bot sqlite3 /app/bot_data.db "$sql" 2>/dev/null || \
+      { _err "sqlite3 not available. Install it: apt install sqlite3"; return 1; }
+  else
+    _err "sqlite3 not installed. Run: apt install sqlite3"; return 1
+  fi
+}
+
+# ────────────────────────────────────────────────────────────────
+#  [1] Bot Control
+# ────────────────────────────────────────────────────────────────
+_menu_control() {
+  while true; do
+    _banner
+    echo -e "  ${BOLD}🤖  Bot Control${RESET}"
+    _status_bar
+    _line
+    echo -e "  ${BOLD}[1]${RESET}  Start"
+    echo -e "  ${BOLD}[2]${RESET}  Stop"
+    echo -e "  ${BOLD}[3]${RESET}  Restart  (apply .env changes)"
+    echo -e "  ${BOLD}[4]${RESET}  Rebuild image + restart  (after code changes)"
+    echo -e "  ${BOLD}[5]${RESET}  Live logs  (Ctrl+C to exit)"
+    echo -e "  ${BOLD}[6]${RESET}  Last 200 lines of logs"
+    echo -e "  ${BOLD}[7]${RESET}  Show bot errors only"
+    echo -e "  ${BOLD}[0]${RESET}  ${DIM}Back${RESET}"
+    _line
+    read -rp "  Choose: " ch
+    case $ch in
+      1) _require_compose && _dc up -d && _ok "Bot started." && _press ;;
+      2) _require_compose && _dc stop bot && _ok "Bot stopped." && _press ;;
+      3) _require_compose
+         _info "Recreating container to apply .env changes..."
+         _dc up -d --force-recreate bot
+         _ok "Restarted — .env changes applied." && _press ;;
+      4) _require_compose
+         _info "Rebuilding image..."
+         _dc build --no-cache bot
+         _dc up -d --force-recreate bot
+         _ok "Done." && _press ;;
+      5) _require_compose && _dc logs -f bot ;;
+      6) _require_compose && _dc logs --tail=200 bot && _press ;;
+      7) _require_compose && _dc logs --tail=300 bot 2>&1 | grep -i "error\|exception\|traceback\|critical" | tail -50 && _press ;;
+      0) return ;;
+      *) _warn "Invalid option." ;;
+    esac
+  done
+}
+
+# ────────────────────────────────────────────────────────────────
+#  [2] Configuration
+# ────────────────────────────────────────────────────────────────
+_menu_config() {
+  while true; do
+    _banner
+    echo -e "  ${BOLD}⚙️   Configuration${RESET}"
+    _line
+    echo -e "  ${BOLD}[1]${RESET}  Edit .env               (main config)"
+    echo -e "  ${BOLD}[2]${RESET}  View .env               (read-only)"
+    echo -e "  ${BOLD}[3]${RESET}  Show key settings        (tokens hidden)"
+    echo -e "  ${BOLD}[4]${RESET}  Edit docker-compose.yml"
+    echo -e "  ${BOLD}[5]${RESET}  Validate .env            (check required fields)"
+    echo -e "  ${BOLD}[0]${RESET}  ${DIM}Back${RESET}"
+    _line
+    read -rp "  Choose: " ch
+    case $ch in
+      1)
+        [[ ! -f "$ENV_FILE" ]] && cp "$BOT_DIR/.env.example" "$ENV_FILE" 2>/dev/null && _info "Created .env from example."
+        ${EDITOR:-nano} "$ENV_FILE"
+        echo ""
+        _ok "Saved."
+        _warn "Changes take effect ONLY after recreating container (option [3] in Bot Control)."
+        read -rp "  Apply changes now? Recreate container? (Y/n): " _yn
+        _yn="${_yn:-Y}"
+        if [[ "$_yn" =~ ^[Yy]$ ]]; then
+          _require_compose
+          _dc up -d --force-recreate bot
+          _ok "Done — new .env is now active."
+        fi
+        _press ;;
+      2)
+        [[ -f "$ENV_FILE" ]] && { echo ""; cat "$ENV_FILE"; _press; } \
+          || { _err ".env not found."; _press; } ;;
+      3)
+        [[ -f "$ENV_FILE" ]] || { _err ".env not found."; _press; continue; }
+        echo ""
+        echo -e "  ${BOLD}Key settings (secrets hidden):${RESET}"
+        echo ""
+        local _keys=(BOT_TOKEN ADMIN_IDS PANEL_URL PANEL_USERNAME PANEL_PASSWORD
+                     SUB_PORT WEBHOOK_PORT NOWPAYMENTS_API_KEY MAXELPAY_API_KEY
+                     ADMIN_SECRET USE_POSTGRES DEFAULT_TRAFFIC_GB DEFAULT_SUBSCRIPTION_DAYS)
+        for _k in "${_keys[@]}"; do
+          local _v; _v=$(grep "^${_k}=" "$ENV_FILE" 2>/dev/null | cut -d= -f2- | tr -d '"' || true)
+          [[ -z "$_v" ]] && continue
+          case "$_k" in
+            BOT_TOKEN|PANEL_PASSWORD|NOWPAYMENTS_API_KEY|MAXELPAY_API_KEY|ADMIN_SECRET)
+              _v="***hidden***" ;;
+          esac
+          echo -e "  ${CYAN}${_k}${RESET} = ${_v}"
+        done
+        _press ;;
+      4) ${EDITOR:-nano} "$COMPOSE_FILE" && _press ;;
+      5)
+        echo ""
+        echo -e "  ${BOLD}Validating .env...${RESET}"
+        echo ""
+        local _required=(BOT_TOKEN ADMIN_IDS PANEL_URL PANEL_USERNAME PANEL_PASSWORD)
+        local _ok_count=0 _err_count=0
+        for _k in "${_required[@]}"; do
+          local _v; _v=$(grep "^${_k}=" "$ENV_FILE" 2>/dev/null | cut -d= -f2- | tr -d '"' || true)
+          if [[ -n "$_v" ]]; then
+            _ok "$_k = ${_k/*PASSWORD*/***hidden***}"
+            (( _ok_count++ )) || true
+          else
+            _err "$_k is MISSING or empty"
+            (( _err_count++ )) || true
+          fi
+        done
+        echo ""
+        if (( _err_count == 0 )); then
+          _ok "All required fields are set."
+        else
+          _warn "$_err_count required field(s) missing — bot may not work."
+        fi
+        _press ;;
+      0) return ;;
+      *) _warn "Invalid option." ;;
+    esac
+  done
+}
+
+# ────────────────────────────────────────────────────────────────
+#  [3] Database
+# ────────────────────────────────────────────────────────────────
+_menu_database() {
+  while true; do
+    _banner
+    echo -e "  ${BOLD}🗄   Database${RESET}"
+    _line
+    if _use_postgres; then
+      echo -e "  ${DIM}Mode: PostgreSQL${RESET}"
+      echo -e "  ${BOLD}[1]${RESET}  Start database"
+      echo -e "  ${BOLD}[2]${RESET}  Stop database"
+      echo -e "  ${BOLD}[3]${RESET}  View database logs"
+      echo -e "  ${BOLD}[4]${RESET}  Open psql shell"
+      echo -e "  ${BOLD}[5]${RESET}  Apply migrations  (add missing columns)"
+      echo -e "  ${BOLD}[6]${RESET}  Export tables to CSV"
+    else
+      echo -e "  ${DIM}Mode: SQLite${RESET}"
+      echo -e "  ${BOLD}[1]${RESET}  Show DB info  (path, size, table counts)"
+      echo -e "  ${BOLD}[2]${RESET}  Apply migrations  (add missing columns)"
+      echo -e "  ${BOLD}[3]${RESET}  Backup DB  (copy to /root/)"
+      echo -e "  ${BOLD}[4]${RESET}  Open SQLite shell  (read-only query)"
+      echo -e "  ${BOLD}[5]${RESET}  Show recent users  (last 10)"
+      echo -e "  ${BOLD}[6]${RESET}  Show active subscriptions count"
+    fi
+    echo -e "  ${BOLD}[0]${RESET}  ${DIM}Back${RESET}"
+    _line
+    read -rp "  Choose: " ch
+
+    if _use_postgres; then
+      case $ch in
+        1) _require_compose && _dc up -d db && _ok "Database started." && _press ;;
+        2) _require_compose && _dc stop db && _ok "Database stopped." && _press ;;
+        3) _require_compose && _dc logs --tail=80 db && _press ;;
+        4) _info "Connecting to psql..."
+           _dc exec db psql -U botuser -d vpn_bot; _press ;;
+        5)
+          _info "Running PostgreSQL migrations..."
+          _dc exec db psql -U botuser -d vpn_bot -c \
+            "ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS limit_ip INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS warned_7d BOOLEAN NOT NULL DEFAULT FALSE;
+             ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS warned_3d BOOLEAN NOT NULL DEFAULT FALSE;
+             ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS warned_1d BOOLEAN NOT NULL DEFAULT FALSE;
+             ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_code VARCHAR(16);
+             ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by INTEGER;
+             CREATE TABLE IF NOT EXISTS plans (
+               id SERIAL PRIMARY KEY, name VARCHAR(64) NOT NULL,
+               traffic_gb INTEGER NOT NULL DEFAULT 0,
+               duration_days INTEGER NOT NULL DEFAULT 30,
+               price_usdt FLOAT NOT NULL,
+               limit_ip INTEGER NOT NULL DEFAULT 0,
+               inbound_ids VARCHAR(256) NOT NULL DEFAULT '',
+               is_active BOOLEAN NOT NULL DEFAULT TRUE,
+               sort_order INTEGER NOT NULL DEFAULT 0,
+               created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+               updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+             );
+             CREATE TABLE IF NOT EXISTS pending_actions (
+               id SERIAL PRIMARY KEY, type VARCHAR(64) NOT NULL,
+               payload TEXT NOT NULL DEFAULT '{}',
+               created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+             );" \
+          && _ok "Migrations done." || _warn "Some may already exist — that's OK."
+          _press ;;
+        6)
+          _info "Exporting tables to CSV..."
+          local _ts; _ts=$(date +%Y%m%d_%H%M)
+          _dc exec -T db psql -U botuser -d vpn_bot \
+            -c "\COPY users TO '/tmp/users_${_ts}.csv' CSV HEADER"  2>/dev/null || true
+          _dc exec -T db psql -U botuser -d vpn_bot \
+            -c "\COPY subscriptions TO '/tmp/subs_${_ts}.csv' CSV HEADER" 2>/dev/null || true
+          _ok "Exported. Check docker exec output above."
+          _press ;;
+        0) return ;;
+        *) _warn "Invalid option." ;;
+      esac
+    else
+      # SQLite mode
+      case $ch in
+        1)
+          local _db; _db=$(_find_sqlite_db)
+          echo ""
+          if [[ -n "$_db" ]]; then
+            _ok "DB path: $_db"
+            ls -lh "$_db"
+            echo ""
+            if command -v sqlite3 &>/dev/null; then
+              echo -e "  ${BOLD}Table row counts:${RESET}"
+              local tables=(users subscriptions payments tickets ticket_messages plans discount_codes admin_settings pending_actions)
+              for t in "${tables[@]}"; do
+                local cnt; cnt=$(sqlite3 "$_db" "SELECT COUNT(*) FROM $t;" 2>/dev/null || echo "N/A")
+                echo -e "  ${DIM}$t${RESET}: $cnt"
+              done
+            fi
+          else
+            _warn "SQLite file not found. Start the bot first."
+          fi
+          _press ;;
+        2)
+          local _db2; _db2=$(_find_sqlite_db)
+          [[ -z "$_db2" ]] && { _err "DB not found."; _press; continue; }
+          _info "Applying SQLite migrations..."
+          if command -v sqlite3 &>/dev/null; then
+            sqlite3 "$_db2" \
+              "ALTER TABLE subscriptions ADD COLUMN limit_ip INTEGER NOT NULL DEFAULT 0;" 2>/dev/null || true
+            sqlite3 "$_db2" \
+              "ALTER TABLE subscriptions ADD COLUMN warned_7d INTEGER NOT NULL DEFAULT 0;" 2>/dev/null || true
+            sqlite3 "$_db2" \
+              "ALTER TABLE subscriptions ADD COLUMN warned_3d INTEGER NOT NULL DEFAULT 0;" 2>/dev/null || true
+            sqlite3 "$_db2" \
+              "ALTER TABLE subscriptions ADD COLUMN warned_1d INTEGER NOT NULL DEFAULT 0;" 2>/dev/null || true
+            sqlite3 "$_db2" \
+              "ALTER TABLE users ADD COLUMN referral_code TEXT;" 2>/dev/null || true
+            sqlite3 "$_db2" \
+              "ALTER TABLE users ADD COLUMN referred_by INTEGER;" 2>/dev/null || true
+            sqlite3 "$_db2" \
+              "CREATE TABLE IF NOT EXISTS plans (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 name TEXT NOT NULL,
+                 traffic_gb INTEGER NOT NULL DEFAULT 0,
+                 duration_days INTEGER NOT NULL DEFAULT 30,
+                 price_usdt REAL NOT NULL,
+                 limit_ip INTEGER NOT NULL DEFAULT 0,
+                 inbound_ids TEXT NOT NULL DEFAULT '',
+                 is_active INTEGER NOT NULL DEFAULT 1,
+                 sort_order INTEGER NOT NULL DEFAULT 0,
+                 created_at TEXT DEFAULT (datetime('now')),
+                 updated_at TEXT DEFAULT (datetime('now'))
+               );" 2>/dev/null || true
+            sqlite3 "$_db2" \
+              "CREATE TABLE IF NOT EXISTS pending_actions (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 type TEXT NOT NULL,
+                 payload TEXT NOT NULL DEFAULT '{}',
+                 created_at TEXT DEFAULT (datetime('now'))
+               );" 2>/dev/null || true
+            sqlite3 "$_db2" \
+              "CREATE TABLE IF NOT EXISTS admin_settings (
+                 key TEXT PRIMARY KEY,
+                 value TEXT NOT NULL DEFAULT ''
+               );" 2>/dev/null || true
+            _ok "Migrations applied (existing columns skipped — that's OK)."
+          else
+            _warn "sqlite3 not installed. Run: apt install sqlite3"
+          fi
+          _press ;;
+        3)
+          local _db3; _db3=$(_find_sqlite_db)
+          [[ -z "$_db3" ]] && { _err "DB not found."; _press; continue; }
+          local _dst="/root/nexora_sqlite_$(date +%Y%m%d_%H%M).db"
+          cp "$_db3" "$_dst" && chmod 600 "$_dst" && _ok "Backed up: $_dst" || _err "Backup failed."
+          _press ;;
+        4)
+          local _db4; _db4=$(_find_sqlite_db)
+          [[ -z "$_db4" ]] && { _err "DB not found."; _press; continue; }
+          if command -v sqlite3 &>/dev/null; then
+            _info "Opening SQLite shell. Type .quit to exit."
+            sqlite3 "$_db4"
+          else
+            _err "sqlite3 not installed. Run: apt install sqlite3"
+          fi
+          _press ;;
+        5)
+          local _db5; _db5=$(_find_sqlite_db)
+          [[ -z "$_db5" ]] && { _err "DB not found."; _press; continue; }
+          if command -v sqlite3 &>/dev/null; then
+            echo ""
+            echo -e "  ${BOLD}Last 10 users:${RESET}"
+            sqlite3 -column -header "$_db5" \
+              "SELECT telegram_id, username, first_name, is_admin, created_at FROM users ORDER BY created_at DESC LIMIT 10;" 2>/dev/null
+          else
+            _err "sqlite3 not installed."
+          fi
+          _press ;;
+        6)
+          local _db6; _db6=$(_find_sqlite_db)
+          [[ -z "$_db6" ]] && { _err "DB not found."; _press; continue; }
+          if command -v sqlite3 &>/dev/null; then
+            echo ""
+            local total; total=$(sqlite3 "$_db6" "SELECT COUNT(*) FROM subscriptions;" 2>/dev/null || echo 0)
+            local active; active=$(sqlite3 "$_db6" "SELECT COUNT(*) FROM subscriptions WHERE status='active';" 2>/dev/null || echo 0)
+            local expired; expired=$(sqlite3 "$_db6" "SELECT COUNT(*) FROM subscriptions WHERE status='expired';" 2>/dev/null || echo 0)
+            local pending; pending=$(sqlite3 "$_db6" "SELECT COUNT(*) FROM payments WHERE status IN ('awaiting_review','waiting','confirming');" 2>/dev/null || echo 0)
+            local tickets; tickets=$(sqlite3 "$_db6" "SELECT COUNT(*) FROM tickets WHERE status IN ('open','in_progress');" 2>/dev/null || echo 0)
+            echo -e "  ${BOLD}Subscriptions:${RESET}"
+            echo -e "  Total: $total   Active: ${GREEN}$active${RESET}   Expired: ${YELLOW}$expired${RESET}"
+            echo -e "  Pending Payments: ${YELLOW}$pending${RESET}    Open Tickets: ${CYAN}$tickets${RESET}"
+          else
+            _err "sqlite3 not installed."
+          fi
+          _press ;;
+        0) return ;;
+        *) _warn "Invalid option." ;;
+      esac
+    fi
+  done
+}
+
+# ────────────────────────────────────────────────────────────────
+#  [4] Backup & Restore — helpers
+# ────────────────────────────────────────────────────────────────
+
+# بک‌آپ امن SQLite — از sqlite3 .backup استفاده می‌کند که
+# حتی در حین اجرای ربات هم safe است (WAL checkpoint + shared lock)
+_backup_sqlite_safe() {
+  local dst="$1"
+  local _db; _db=$(_find_sqlite_db)
+  if [[ -z "$_db" ]]; then
+    _warn "SQLite DB not found — bot may not have started yet."
+    return 1
+  fi
+  if command -v sqlite3 &>/dev/null; then
+    # sqlite3 .backup تضمین می‌کند که DB در حال تراکنش هم درست کپی می‌شود
+    sqlite3 "$_db" ".backup '$dst'" 2>/dev/null \
+      && _ok "DB (SQLite safe backup): $dst" \
+      || { _err "sqlite3 .backup failed — falling back to cp"; cp "$_db" "$dst" && _ok "DB (cp fallback): $dst" || return 1; }
+  else
+    # اگه sqlite3 نصب نیست، با cp معمولی (ریسک جزئی در حین نوشتن)
+    _warn "sqlite3 not installed — using cp (install: apt install sqlite3 for safe backup)"
+    cp "$_db" "$dst" && _ok "DB (SQLite): $dst" || return 1
+  fi
+}
+
+_backup_ssl() {
+  local ts="$1"
+  local dst="/root/nexora_ssl_backup_${ts}.tar.gz"
+  if [[ ! -d /etc/letsencrypt ]]; then
+    _info "No SSL certs (/etc/letsencrypt missing) — skipping."
+    return 0
+  fi
+  tar -czf "$dst" /etc/letsencrypt/ 2>/dev/null \
+    && _ok "SSL certs: $dst" \
+    || { _err "SSL backup failed."; return 1; }
+}
+
+_backup_env() {
+  local ts="$1"
+  local _backed=0
+  # بک‌آپ bot/.env
+  if [[ -f "$ENV_FILE" ]]; then
+    local dst="/root/nexora_env_backup_${ts}.env"
+    cp "$ENV_FILE" "$dst" && chmod 600 "$dst" && _ok "bot/.env: $dst" && (( _backed++ )) || _err "bot/.env backup failed."
+  else
+    _warn "bot/.env not found — skipping."
+  fi
+  # بک‌آپ panel/.env.local — شامل پسورد پنل و همه تنظیمات
+  if [[ -f "$PANEL_ENV_LOCAL" ]]; then
+    local dst2="/root/nexora_panel_env_backup_${ts}.env"
+    cp "$PANEL_ENV_LOCAL" "$dst2" && chmod 600 "$dst2" \
+      && _ok "panel/.env.local: $dst2" && (( _backed++ )) || _err "panel/.env.local backup failed."
+  fi
+  (( _backed > 0 )) || { _warn "No env files backed up."; return 1; }
+}
+
+_backup_nginx() {
+  local ts="$1"
+  local _backed=0
+  for _conf in \
+    "/etc/nginx/conf.d/nexora-webhook.conf" \
+    "/etc/nginx/conf.d/nexora-panel.conf"; do
+    [[ -f "$_conf" ]] || continue
+    local _name; _name=$(basename "$_conf" .conf)
+    local dst="/root/nexora_nginx_${_name}_backup_${ts}.conf"
+    cp "$_conf" "$dst" && _ok "nginx ${_name}: $dst" && (( _backed++ )) || true
+  done
+  (( _backed == 0 )) && _info "No nginx nexora configs found — skipping."
+}
+
+_backup_full() {
+  local ts; ts=$(date +%Y%m%d_%H%M%S)
+  echo ""
+  echo -e "  ${BOLD}━━━ Full Backup — ${ts} ━━━${RESET}"
+  echo ""
+
+  # 1 — Database
+  _info "[1/4] Database..."
+  if _use_postgres; then
+    local dump="/root/nexora_pgdump_${ts}.sql"
+    _require_compose
+    _dc exec -T db pg_dump -U botuser vpn_bot > "$dump" \
+      && _ok "PostgreSQL: $dump" \
+      || _err "pg_dump failed."
+  else
+    local db_dst="/root/nexora_sqlite_${ts}.db"
+    _backup_sqlite_safe "$db_dst"
+  fi
+
+  # 2 — SSL certs
+  _info "[2/4] SSL certificates..."
+  _backup_ssl "$ts"
+
+  # 3 — Env files (bot + panel)
+  _info "[3/4] Config files (.env / .env.local)..."
+  _backup_env "$ts"
+
+  # 4 — nginx configs
+  _info "[4/4] nginx configs..."
+  _backup_nginx "$ts"
+
+  echo ""
+  echo -e "  ${GREEN}${BOLD}✔  Full backup complete!${RESET}"
+  echo -e "  ${DIM}All files saved to /root/nexora_*_${ts}.*${RESET}"
+  echo ""
+  # نمایش فایل‌های بک‌آپ این اجرا
+  ls -lh /root/nexora_*_${ts}.* 2>/dev/null | awk '{printf "  %s %s\n", $5, $NF}'
+}
+
+_menu_backup() {
+  while true; do
+    _banner
+    echo -e "  ${BOLD}💾  Backup & Restore${RESET}"
+    _line
+    echo -e "  ${CYAN}${BOLD}  ── BACKUP ──────────────────────────────────${RESET}"
+    echo -e "  ${BOLD}[1]${RESET}  Full backup       (DB + SSL + .env + panel env + nginx)"
+    if _use_postgres; then
+      echo -e "  ${BOLD}[2]${RESET}  Database only     (PostgreSQL dump)"
+    else
+      echo -e "  ${BOLD}[2]${RESET}  Database only     (SQLite — safe even while bot runs)"
+    fi
+    echo -e "  ${BOLD}[3]${RESET}  SSL certs only"
+    echo -e "  ${BOLD}[4]${RESET}  Config only       (bot/.env + panel/.env.local)"
+    echo -e "  ${BOLD}[5]${RESET}  List backup files"
+    echo -e "  ${BOLD}[6]${RESET}  Cleanup old backups  (keep last 5 of each type)"
+    echo ""
+    echo -e "  ${CYAN}${BOLD}  ── RESTORE ─────────────────────────────────${RESET}"
+    if _use_postgres; then
+      echo -e "  ${BOLD}[7]${RESET}  Restore PostgreSQL DB  (from .sql dump)"
+    else
+      echo -e "  ${BOLD}[7]${RESET}  Restore SQLite DB      (from backup file)"
+    fi
+    echo -e "  ${BOLD}[8]${RESET}  Restore bot .env       (from backup file)"
+    echo -e "  ${BOLD}[9]${RESET}  Restore panel .env.local  (from backup file)"
+    echo -e "  ${BOLD}[0]${RESET}  ${DIM}Back${RESET}"
+    _line
+    read -rp "  Choose: " ch
+    case $ch in
+      # ── BACKUP ─────────────────────────────────────────────
+      1) _backup_full; _press ;;
+      2)
+        local _ts2; _ts2=$(date +%Y%m%d_%H%M%S)
+        if _use_postgres; then
+          local dump="/root/nexora_pgdump_${_ts2}.sql"
+          _require_compose
+          _info "Dumping PostgreSQL to $dump ..."
+          _dc exec -T db pg_dump -U botuser vpn_bot > "$dump" \
+            && _ok "Saved: $dump  ($(ls -lh "$dump" | awk '{print $5}'))" \
+            || _err "pg_dump failed."
+        else
+          local db_dst="/root/nexora_sqlite_${_ts2}.db"
+          _backup_sqlite_safe "$db_dst"
+        fi
+        _press ;;
+      3)
+        local _ts3; _ts3=$(date +%Y%m%d_%H%M%S)
+        _backup_ssl "$_ts3"; _press ;;
+      4)
+        local _ts4; _ts4=$(date +%Y%m%d_%H%M%S)
+        _backup_env "$_ts4"; _press ;;
+      5)
+        echo ""
+        echo -e "  ${BOLD}Nexora backup files in /root/:${RESET}"
+        echo ""
+        local _any=0
+        for _ext in "*.db" "*.sql" "*.tar.gz" "*.env" "*.conf"; do
+          local _files; _files=$(ls /root/nexora_${_ext} 2>/dev/null || true)
+          [[ -z "$_files" ]] && continue
+          echo -e "  ${DIM}--- ${_ext} ---${RESET}"
+          ls -lht /root/nexora_${_ext} 2>/dev/null | awk '{printf "  %s  %s  %s\n", $6, $7, $NF}' || true
+          _any=1
+        done
+        (( _any == 0 )) && _warn "No backup files found in /root/." || true
+        _press ;;
+      6)
+        echo ""
+        _info "Keeping last 5 of each backup type, deleting older ones..."
+        local _deleted=0
+        for _pattern in "nexora_sqlite_*.db" "nexora_pgdump_*.sql" \
+                         "nexora_ssl_backup_*.tar.gz" "nexora_env_backup_*.env" \
+                         "nexora_panel_env_backup_*.env" "nexora_nginx_*.conf"; do
+          local _old_files
+          # ls -t = newest first, tail -n +6 = skip newest 5, delete rest
+          _old_files=$(ls -t /root/${_pattern} 2>/dev/null | tail -n +6 || true)
+          if [[ -n "$_old_files" ]]; then
+            while IFS= read -r _f; do
+              rm -f "$_f" && _ok "Deleted: $_f" && (( _deleted++ )) || true
+            done <<< "$_old_files"
+          fi
+        done
+        (( _deleted == 0 )) && _ok "Nothing to clean up." || _ok "$_deleted old backup(s) deleted."
+        _press ;;
+
+      # ── RESTORE ─────────────────────────────────────────────
+      7)
+        if _use_postgres; then
+          # PostgreSQL restore از فایل .sql
+          echo ""
+          echo -e "  ${BOLD}PostgreSQL dump files in /root/:${RESET}"
+          local _pgfiles=(); mapfile -t _pgfiles < <(ls -t /root/nexora_pgdump_*.sql 2>/dev/null || true)
+          if [[ ${#_pgfiles[@]} -eq 0 ]]; then
+            _warn "No .sql dump files found. Run backup [2] first."; _press; continue
+          fi
+          for i in "${!_pgfiles[@]}"; do
+            local _sz; _sz=$(ls -lh "${_pgfiles[$i]}" | awk '{print $5}')
+            echo -e "  ${BOLD}[$((i+1))]${RESET}  ${_pgfiles[$i]}  ${DIM}(${_sz})${RESET}"
+          done
+          echo ""
+          read -rp "  Select dump number (0 to cancel): " _pick
+          [[ "$_pick" == "0" || -z "$_pick" ]] && continue
+          if [[ "$_pick" =~ ^[0-9]+$ ]] && (( _pick >= 1 && _pick <= ${#_pgfiles[@]} )); then
+            local _chosen_pg="${_pgfiles[$((_pick-1))]}"
+            _warn "This will DROP and recreate all tables in vpn_bot database!"
+            read -rp "  Type YES to confirm: " _conf_pg
+            if [[ "$_conf_pg" == "YES" ]]; then
+              _require_compose
+              _info "Stopping bot container..."
+              _dc stop bot 2>/dev/null || true
+              _info "Restoring PostgreSQL from $_chosen_pg ..."
+              # Drop + recreate schema, then restore
+              _dc exec -T db psql -U botuser -d postgres \
+                -c "DROP DATABASE IF EXISTS vpn_bot; CREATE DATABASE vpn_bot OWNER botuser;" 2>/dev/null || true
+              _dc exec -T db psql -U botuser -d vpn_bot < "$_chosen_pg" \
+                && _ok "PostgreSQL restore complete." \
+                || _err "PostgreSQL restore failed."
+              _info "Starting bot container..."
+              _dc up -d bot
+              _ok "Bot restarted."
+            else
+              _warn "Cancelled."
+            fi
+          else
+            _warn "Invalid selection."
+          fi
+          _press
+
+        else
+          # SQLite restore
+          local _live; _live=$(_find_sqlite_db)
+          [[ -z "$_live" ]] && { _err "Live DB path not found."; _press; continue; }
+          echo ""
+          echo -e "  ${BOLD}SQLite backup files in /root/:${RESET}"
+          local _bfiles=(); mapfile -t _bfiles < <(ls -t /root/nexora_sqlite_*.db 2>/dev/null || true)
+          if [[ ${#_bfiles[@]} -eq 0 ]]; then
+            _warn "No backup files found. Run backup [2] first."; _press; continue
+          fi
+          for i in "${!_bfiles[@]}"; do
+            local _sz; _sz=$(ls -lh "${_bfiles[$i]}" | awk '{print $5}')
+            echo -e "  ${BOLD}[$((i+1))]${RESET}  ${_bfiles[$i]}  ${DIM}(${_sz})${RESET}"
+          done
+          echo ""
+          read -rp "  Select backup number (0 to cancel): " _pick
+          [[ "$_pick" == "0" || -z "$_pick" ]] && continue
+          if [[ "$_pick" =~ ^[0-9]+$ ]] && (( _pick >= 1 && _pick <= ${#_bfiles[@]} )); then
+            local _chosen="${_bfiles[$((_pick-1))]}"
+            echo ""
+            _warn "This will REPLACE the live DB: ${_live}"
+            _warn "The bot container will be STOPPED and restarted automatically."
+            read -rp "  Type YES to confirm: " _conf
+            if [[ "$_conf" == "YES" ]]; then
+              # 1. Auto-backup فعلی قبل از restore
+              local _auto_bak="${_live}.before_restore_$(date +%s)"
+              _info "Auto-backing up current DB → $_auto_bak"
+              if command -v sqlite3 &>/dev/null; then
+                sqlite3 "$_live" ".backup '${_auto_bak}'" 2>/dev/null || cp "$_live" "$_auto_bak"
+              else
+                cp "$_live" "$_auto_bak"
+              fi
+              _ok "Current DB saved."
+              # 2. Stop کردن ربات — ضروری برای SQLite file lock
+              _info "Stopping bot container (required for SQLite restore)..."
+              _require_compose && _dc stop bot 2>/dev/null || true
+              sleep 2
+              # 3. Copy بک‌آپ به مسیر live
+              cp "$_chosen" "$_live" \
+                && _ok "Restore complete: $(_live)" \
+                || { _err "Restore failed!"; _info "Restoring original..."; cp "$_auto_bak" "$_live"; _ok "Original restored."; _press; continue; }
+              # 4. Start کردن ربات
+              _info "Starting bot container..."
+              _dc up -d bot
+              _ok "Bot restarted — restore successful!"
+            else
+              _warn "Cancelled."
+            fi
+          else
+            _warn "Invalid selection."
+          fi
+          _press
+        fi ;;
+
+      8)
+        # Restore bot .env
+        echo ""
+        echo -e "  ${BOLD}bot/.env backup files in /root/:${RESET}"
+        local _envfiles=(); mapfile -t _envfiles < <(ls -t /root/nexora_env_backup_*.env 2>/dev/null || true)
+        if [[ ${#_envfiles[@]} -eq 0 ]]; then
+          _warn "No .env backup files found. Run backup [4] first."; _press; continue
+        fi
+        for i in "${!_envfiles[@]}"; do
+          echo -e "  ${BOLD}[$((i+1))]${RESET}  ${_envfiles[$i]}"
+        done
+        echo ""
+        read -rp "  Select (0 to cancel): " _pick
+        [[ "$_pick" == "0" || -z "$_pick" ]] && continue
+        if [[ "$_pick" =~ ^[0-9]+$ ]] && (( _pick >= 1 && _pick <= ${#_envfiles[@]} )); then
+          local _chosen_env="${_envfiles[$((_pick-1))]}"
+          _warn "This will REPLACE $ENV_FILE"
+          read -rp "  Type YES to confirm: " _ce
+          if [[ "$_ce" == "YES" ]]; then
+            cp "$ENV_FILE" "$ENV_FILE.before_restore_$(date +%s)" 2>/dev/null || true
+            cp "$_chosen_env" "$ENV_FILE" && chmod 600 "$ENV_FILE" \
+              && _ok "bot/.env restored." \
+              || _err "Restore failed."
+            read -rp "  Recreate bot container to apply new .env? (Y/n): " _rr; _rr="${_rr:-Y}"
+            [[ "$_rr" =~ ^[Yy]$ ]] && _require_compose && _dc up -d --force-recreate bot && _ok "Bot restarted."
+          else
+            _warn "Cancelled."
+          fi
+        fi
+        _press ;;
+
+      9)
+        # Restore panel .env.local
+        echo ""
+        echo -e "  ${BOLD}panel .env.local backup files in /root/:${RESET}"
+        local _penvfiles=(); mapfile -t _penvfiles < <(ls -t /root/nexora_panel_env_backup_*.env 2>/dev/null || true)
+        if [[ ${#_penvfiles[@]} -eq 0 ]]; then
+          _warn "No panel .env.local backup files found. Run backup [4] first."; _press; continue
+        fi
+        for i in "${!_penvfiles[@]}"; do
+          echo -e "  ${BOLD}[$((i+1))]${RESET}  ${_penvfiles[$i]}"
+        done
+        echo ""
+        read -rp "  Select (0 to cancel): " _pick
+        [[ "$_pick" == "0" || -z "$_pick" ]] && continue
+        if [[ "$_pick" =~ ^[0-9]+$ ]] && (( _pick >= 1 && _pick <= ${#_penvfiles[@]} )); then
+          local _chosen_penv="${_penvfiles[$((_pick-1))]}"
+          _warn "This will REPLACE $PANEL_ENV_LOCAL"
+          read -rp "  Type YES to confirm: " _cpe
+          if [[ "$_cpe" == "YES" ]]; then
+            cp "$PANEL_ENV_LOCAL" "$PANEL_ENV_LOCAL.before_restore_$(date +%s)" 2>/dev/null || true
+            cp "$_chosen_penv" "$PANEL_ENV_LOCAL" && chmod 600 "$PANEL_ENV_LOCAL" \
+              && _ok "panel .env.local restored." \
+              || _err "Restore failed."
+            read -rp "  Restart panel service to apply? (Y/n): " _rp; _rp="${_rp:-Y}"
+            [[ "$_rp" =~ ^[Yy]$ ]] && systemctl restart "$PANEL_SYSTEMD_SERVICE" 2>/dev/null \
+              && _ok "Panel restarted." || _warn "Could not restart panel."
+          else
+            _warn "Cancelled."
+          fi
+        fi
+        _press ;;
+
+      0) return ;;
+      *) _warn "Invalid option." ;;
+    esac
+  done
+}
+
+# ────────────────────────────────────────────────────────────────
+#  [5] System Info
+# ────────────────────────────────────────────────────────────────
+_menu_sysinfo() {
+  _banner
+  echo -e "  ${BOLD}📊  System Info${RESET}"
+  _line
+  echo ""
+  echo -e "  ${BOLD}OS:${RESET}"
+  cat /etc/os-release 2>/dev/null | grep PRETTY_NAME | cut -d= -f2 | tr -d '"' | awk '{print "  "$0}' || true
+  uname -r | awk '{print "  Kernel: "$0}' || true
+  echo ""
+  echo -e "  ${BOLD}Containers:${RESET}"
+  docker ps --format "  {{.Names}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null | column -t || _warn "Docker not running."
+  echo ""
+  echo -e "  ${BOLD}Disk:${RESET}"
+  df -h / | awk 'NR==2{printf "  Used: %s / %s  (%s free)\n", $3, $2, $4}'
+  echo ""
+  echo -e "  ${BOLD}Memory:${RESET}"
+  free -h | awk '/^Mem:/{printf "  Used: %s / %s\n", $3, $2}'
+  echo ""
+  echo -e "  ${BOLD}CPU load:${RESET}"
+  uptime | awk -F'load average:' '{print "  "$2}' || true
+  echo ""
+  echo -e "  ${BOLD}Docker volumes:${RESET}"
+  docker volume ls --filter name=nexora 2>/dev/null | tail -n +2 | awk '{print "  "$2}' || true
+  echo ""
+  echo -e "  ${BOLD}Bot directory:${RESET}  $BOT_DIR"
+  echo -e "  ${BOLD}DB mode:${RESET}        $( _use_postgres && echo "PostgreSQL" || echo "SQLite" )"
+  if ! _use_postgres; then
+    local _db; _db=$(_find_sqlite_db)
+    [[ -n "$_db" ]] && echo -e "  ${BOLD}SQLite path:${RESET}    $_db  ($(ls -lh "$_db" | awk '{print $5}'))"
+  fi
+  echo -e "  ${BOLD}.env present:${RESET}   $( [[ -f "$ENV_FILE" ]] && echo -e "${GREEN}Yes${RESET}" || echo -e "${RED}No${RESET}" )"
+  echo ""
+  # وضعیت سرویس‌های systemd
+  echo -e "  ${BOLD}Services:${RESET}"
+  for svc in nexora-panel nginx; do
+    if systemctl is-active "$svc" &>/dev/null; then
+      echo -e "  ${GREEN}● $svc${RESET} — running"
+    elif systemctl list-units --all 2>/dev/null | grep -q "$svc"; then
+      echo -e "  ${RED}● $svc${RESET} — stopped"
+    fi
+  done
+  echo ""
+  _press
+}
+
+# ────────────────────────────────────────────────────────────────
+#  SSL helpers (from v1.1 — unchanged)
+# ────────────────────────────────────────────────────────────────
+_ssl_certbot_ok() { hash -r 2>/dev/null || true; certbot --version &>/dev/null; }
+
+_ssl_list_domains() {
+  if [[ -d /etc/letsencrypt/live ]]; then
+    local domains; domains=$(ls /etc/letsencrypt/live/ 2>/dev/null | grep -v "^README$" || true)
+    if [[ -n "$domains" ]]; then
+      echo -e "\n  ${BOLD}Installed certificates:${RESET}"
+      while IFS= read -r d; do
+        [[ -z "$d" ]] && continue
+        local cert="/etc/letsencrypt/live/$d/fullchain.pem"
+        local exp="unknown"
+        [[ -f "$cert" ]] && exp=$(openssl x509 -enddate -noout -in "$cert" 2>/dev/null | sed 's/notAfter=//' || echo "unknown")
+        echo -e "  ${GREEN}✔${RESET}  ${BOLD}$d${RESET}  ${DIM}(expires: $exp)${RESET}"
+      done <<< "$domains"
+    else
+      echo -e "\n  ${DIM}No certificates found.${RESET}"
+    fi
+  else
+    echo -e "\n  ${DIM}No certificates yet. Use [1] to get one.${RESET}"
+  fi
+}
+
+_ssl_install_certbot() {
+  if _ssl_certbot_ok; then _ok "certbot already installed."; return 0; fi
+  _info "Installing certbot..."
+  if command -v apt-get &>/dev/null; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y certbot 2>&1 | grep -E "^(Setting up|certbot|E:)" || true
+  elif command -v dnf &>/dev/null; then
+    dnf install -y certbot 2>&1 | tail -3 || true
+  else
+    yum install -y certbot 2>&1 | tail -3 || true
+  fi
+  hash -r 2>/dev/null || true
+  if ! _ssl_certbot_ok; then
+    snap install --classic certbot 2>/dev/null && ln -sf /snap/bin/certbot /usr/bin/certbot 2>/dev/null || true
+    hash -r 2>/dev/null || true
+  fi
+  _ssl_certbot_ok && _ok "certbot installed." || { _err "certbot install failed."; return 1; }
+}
+
+_ssl_get_cert() {
+  local domain="$1" email="$2"
+  echo ""
+  _info "Obtaining certificate for: ${BOLD}$domain${RESET}"
+  local server_ip domain_ip
+  server_ip=$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null || curl -s --max-time 5 https://ifconfig.me 2>/dev/null || echo "")
+  domain_ip=$(getent hosts "$domain" 2>/dev/null | awk '{print $1}' | head -1 || dig +short "$domain" 2>/dev/null | grep -v '\.$' | tail -1 || echo "")
+  if [[ -n "$server_ip" && -n "$domain_ip" ]]; then
+    if [[ "$server_ip" != "$domain_ip" ]]; then
+      _warn "DNS mismatch! Server: $server_ip / Domain: $domain_ip"
+      read -rp "  Continue anyway? (y/N): " _c
+      [[ "$_c" =~ ^[Yy]$ ]] || return 1
+    else
+      _ok "DNS OK — $domain → $domain_ip"
+    fi
+  fi
+  local _stopped_nginx=false _stopped_apache=false
+  if ss -tlnp 2>/dev/null | grep -q ':80 '; then
+    _warn "Port 80 in use — stopping service temporarily..."
+    systemctl is-active nginx  &>/dev/null && systemctl stop nginx  && _stopped_nginx=true  && _info "nginx stopped."
+    systemctl is-active apache2 &>/dev/null && systemctl stop apache2 && _stopped_apache=true && _info "apache2 stopped."
+  fi
+  echo ""
+  _info "Running certbot standalone..."
+  certbot certonly --standalone --non-interactive --agree-tos --email "$email" \
+    --domain "$domain" --preferred-challenges http 2>&1 | while IFS= read -r line; do echo -e "  ${DIM}$line${RESET}"; done
+  local cert_ok=false
+  [[ -f "/etc/letsencrypt/live/$domain/fullchain.pem" ]] && cert_ok=true
+  [[ "$_stopped_nginx"  == "true" ]] && systemctl start nginx  2>/dev/null && _info "nginx restarted."
+  [[ "$_stopped_apache" == "true" ]] && systemctl start apache2 2>/dev/null && _info "apache2 restarted."
+  if [[ "$cert_ok" == "true" ]]; then
+    _ok "Certificate obtained for ${BOLD}$domain${RESET} ✓"; return 0
+  else
+    _err "certbot failed. Check DNS, port 80, and rate limits."; return 1
+  fi
+}
+
+_ssl_setup_nginx_proxy() {
+  local domain="$1"
+  local wh_port; wh_port=$(_env_read "$ENV_FILE" "WEBHOOK_PORT" "9988")
+  command -v nginx &>/dev/null || {
+    _info "Installing nginx..."
+    command -v apt-get &>/dev/null && DEBIAN_FRONTEND=noninteractive apt-get install -y nginx 2>&1 | tail -3 || true
+    command -v dnf &>/dev/null && dnf install -y nginx 2>&1 | tail -3 || true
+  }
+  local conf_file="/etc/nginx/conf.d/nexora-webhook.conf"
+  cat > "$conf_file" <<NGINXCONF
+server {
+    listen 80;
+    server_name ${domain};
+    location /.well-known/acme-challenge/ { root /var/www/html; }
+    location / { return 301 https://\$host\$request_uri; }
+}
+server {
+    listen 443 ssl;
+    server_name ${domain};
+    ssl_certificate     /etc/letsencrypt/live/${domain}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${domain}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    location /webhook/ {
+        proxy_pass http://127.0.0.1:${wh_port};
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_read_timeout 15s;
+    }
+    location /health { proxy_pass http://127.0.0.1:${wh_port}/health; }
+    location / { return 404; }
+}
+NGINXCONF
+  nginx -t 2>/dev/null && systemctl enable nginx --now 2>/dev/null && systemctl reload nginx 2>/dev/null \
+    && _ok "nginx proxy configured → https://${domain}/webhook/" || { _err "nginx config failed."; return 1; }
+}
+
+_ssl_update_env() {
+  local domain="$1"
+  local now_url="https://${domain}/webhook/nowpayments"
+  local maxel_url="https://${domain}/webhook/maxelpay"
+  echo ""
+  echo -e "  ${BOLD}Webhook URLs:${RESET}"
+  echo -e "  NOWPayments : ${CYAN}${now_url}${RESET}"
+  echo -e "  MaxelPay    : ${CYAN}${maxel_url}${RESET}"
+  echo ""
+  read -rp "  Update .env automatically? (Y/n): " _yn; _yn="${_yn:-Y}"
+  [[ "$_yn" =~ ^[Yy]$ ]] || return 0
+  _env_set "NOWPAYMENTS_IPN_URL"  "$now_url"
+  _env_set "MAXELPAY_WEBHOOK_URL" "$maxel_url"
+  _ok ".env updated."
+  echo ""
+  echo -e "  ${YELLOW}${BOLD}ACTION REQUIRED — Update your payment dashboards:${RESET}"
+  echo -e "  1. NOWPayments → Settings → IPN URL: ${CYAN}${now_url}${RESET}"
+  echo -e "  2. MaxelPay    → API Keys → Webhook:  ${CYAN}${maxel_url}${RESET}"
+  echo ""
+  read -rp "  Restart bot now? (Y/n): " _ryn; _ryn="${_ryn:-Y}"
+  [[ "$_ryn" =~ ^[Yy]$ ]] && _require_compose && _dc up -d --force-recreate bot && _ok "Bot restarted."
+}
+
+# ────────────────────────────────────────────────────────────────
+#  [7] SSL Manager
+# ────────────────────────────────────────────────────────────────
+_menu_ssl() {
+  while true; do
+    _banner
+    echo -e "  ${BOLD}🔒  SSL Manager — Let's Encrypt${RESET}"
+    _line
+    _ssl_list_domains
+    echo ""
+    echo -e "  ${BOLD}[1]${RESET}  Get new certificate      (for bot webhooks)"
+    echo -e "  ${BOLD}[2]${RESET}  Renew all certificates   (certbot renew)"
+    echo -e "  ${BOLD}[3]${RESET}  Show certificate details"
+    echo -e "  ${BOLD}[4]${RESET}  ${GREEN}Get certificate for Web Panel${RESET}  (HTTPS)"
+    echo -e "  ${BOLD}[0]${RESET}  ${DIM}Back${RESET}"
+    _line
+    read -rp "  Choose: " ch
+    case $ch in
+      1)
+        read -rp "  Domain: " _domain; _domain="${_domain// /}"
+        [[ -z "$_domain" ]] && { _warn "Domain cannot be empty."; _press; continue; }
+        read -rp "  Email [optional, Enter to skip]: " _email
+        [[ -z "$_email" ]] && _email="noreply@${_domain}" && _info "Using auto email."
+        _ssl_install_certbot || { _press; continue; }
+        _ssl_get_cert "$_domain" "$_email" || { _press; continue; }
+        read -rp "  Setup nginx HTTPS proxy for webhooks? (Y/n): " _nyn; _nyn="${_nyn:-Y}"
+        [[ "$_nyn" =~ ^[Yy]$ ]] && _ssl_setup_nginx_proxy "$_domain"
+        _ssl_update_env "$_domain"; _press ;;
+      2)
+        _info "Renewing certificates..."
+        if _ssl_certbot_ok; then
+          systemctl is-active nginx &>/dev/null \
+            && certbot renew --nginx --quiet 2>&1 | tail -5 \
+            || certbot renew --standalone --quiet 2>&1 | tail -5
+          _ok "Renewal complete."
+        else
+          _warn "certbot not installed. Use [1] first."
+        fi
+        _press ;;
+      3)
+        echo ""
+        _ssl_certbot_ok && certbot certificates 2>/dev/null || _warn "certbot not installed."
+        _press ;;
+      4)
+        read -rp "  Domain for Web Panel: " _pdomain; _pdomain="${_pdomain// /}"
+        [[ -z "$_pdomain" ]] && { _warn "Domain cannot be empty."; _press; continue; }
+        read -rp "  Email [optional]: " _pemail
+        [[ -z "$_pemail" ]] && _pemail="noreply@${_pdomain}"
+        _ssl_install_certbot || { _press; continue; }
+        _ssl_get_cert "$_pdomain" "$_pemail" || { _press; continue; }
+        _env_set "WEB_PANEL_DOMAIN" "$_pdomain"
+        read -rp "  Setup nginx HTTPS proxy for web panel? (Y/n): " _pnyn; _pnyn="${_pnyn:-Y}"
+        if [[ "$_pnyn" =~ ^[Yy]$ ]]; then
+          local _panelport; _panelport=$(_env_read "$PANEL_ENV_LOCAL" "WEB_PANEL_PORT" "3000")
+          local _panelpath; _panelpath=$(_env_read "$PANEL_ENV_LOCAL" "WEB_PANEL_PATH" "/nexora")
+          local _nginx_conf="/etc/nginx/conf.d/nexora-panel.conf"
+          cat > "$_nginx_conf" <<NGINXEOF
+server {
+    listen 443 ssl;
+    server_name ${_pdomain};
+    ssl_certificate     /etc/letsencrypt/live/${_pdomain}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${_pdomain}/privkey.pem;
+    location ${_panelpath} {
+        proxy_pass http://127.0.0.1:${_panelport};
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+    }
+}
+server {
+    listen 80;
+    server_name ${_pdomain};
+    return 301 https://\$host\$request_uri;
+}
+NGINXEOF
+          command -v nginx &>/dev/null && nginx -t 2>/dev/null \
+            && systemctl reload nginx 2>/dev/null && _ok "nginx HTTPS proxy configured." \
+            || _warn "nginx not found or config failed."
+        fi
+        _ok "SSL ready: https://${_pdomain}${_panelpath:-/nexora}"
+        _press ;;
+      0) return ;;
+      *) _warn "Invalid option." ;;
+    esac
+  done
+}
+
+# ────────────────────────────────────────────────────────────────
+#  [8] Webhook Manager
+# ────────────────────────────────────────────────────────────────
+_webhook_show_current() {
+  echo ""
+  local now_url maxel_url wh_port
+  now_url=$(_env_read "$ENV_FILE" "NOWPAYMENTS_IPN_URL" "(not set)")
+  maxel_url=$(_env_read "$ENV_FILE" "MAXELPAY_WEBHOOK_URL" "(not set)")
+  wh_port=$(_env_read "$ENV_FILE" "WEBHOOK_PORT" "9988")
+  echo -e "  ${BOLD}Current webhook configuration:${RESET}"
+  echo -e "  NOWPayments  : ${CYAN}${now_url}${RESET}"
+  echo -e "  MaxelPay     : ${CYAN}${maxel_url}${RESET}"
+  echo -e "  Internal port: ${CYAN}${wh_port}${RESET}"
+  echo ""
+}
+
+_webhook_pick_domain() {
+  PICKED_DOMAIN=""
+  local domains_arr=()
+  if [[ -d /etc/letsencrypt/live ]]; then
+    while IFS= read -r d; do
+      [[ "$d" == "README" || -z "$d" ]] && continue
+      domains_arr+=("$d")
+    done < <(ls /etc/letsencrypt/live/ 2>/dev/null || true)
+  fi
+  if [[ ${#domains_arr[@]} -gt 0 ]]; then
+    echo -e "\n  ${BOLD}SSL domains:${RESET}"
+    for i in "${!domains_arr[@]}"; do
+      echo -e "  ${BOLD}[$((i+1))]${RESET}  ${domains_arr[$i]}"
+    done
+    echo -e "  ${BOLD}[m]${RESET}  Enter manually"
+    echo ""
+    read -rp "  Select: " _pick
+    if [[ "$_pick" =~ ^[0-9]+$ ]] && (( _pick >= 1 && _pick <= ${#domains_arr[@]} )); then
+      PICKED_DOMAIN="${domains_arr[$((_pick-1))]}"
+    else
+      read -rp "  Domain: " PICKED_DOMAIN
+    fi
+  else
+    _warn "No SSL certs found. Use SSL Manager [7] first."
+    read -rp "  Enter domain manually: " PICKED_DOMAIN
+  fi
+  PICKED_DOMAIN="${PICKED_DOMAIN// /}"
+}
+
+_menu_webhook() {
+  while true; do
+    _banner
+    echo -e "  ${BOLD}🔗  Webhook Manager${RESET}"
+    _line
+    _webhook_show_current
+    echo -e "  ${BOLD}[1]${RESET}  Set webhook URLs from SSL domain"
+    echo -e "  ${BOLD}[2]${RESET}  Set NOWPayments IPN URL manually"
+    echo -e "  ${BOLD}[3]${RESET}  Set MaxelPay Webhook URL manually"
+    echo -e "  ${BOLD}[4]${RESET}  Test webhook server  (/health check)"
+    echo -e "  ${BOLD}[0]${RESET}  ${DIM}Back${RESET}"
+    _line
+    read -rp "  Choose: " ch
+    case $ch in
+      1)
+        _webhook_pick_domain
+        [[ -n "$PICKED_DOMAIN" ]] && _ssl_update_env "$PICKED_DOMAIN"
+        _press ;;
+      2)
+        echo -e "  ${DIM}Example: https://pay.example.com/webhook/nowpayments${RESET}"
+        read -rp "  NOWPayments IPN URL: " _url
+        [[ -z "$_url" ]] && { _press; continue; }
+        _env_set "NOWPAYMENTS_IPN_URL" "$_url"
+        _ok "Updated. Also update your NOWPayments dashboard."
+        read -rp "  Restart bot now? (Y/n): " _r; _r="${_r:-Y}"
+        [[ "$_r" =~ ^[Yy]$ ]] && _require_compose && _dc up -d --force-recreate bot && _ok "Bot restarted."
+        _press ;;
+      3)
+        echo -e "  ${DIM}Example: https://pay.example.com/webhook/maxelpay${RESET}"
+        read -rp "  MaxelPay Webhook URL: " _url
+        [[ -z "$_url" ]] && { _press; continue; }
+        _env_set "MAXELPAY_WEBHOOK_URL" "$_url"
+        _ok "Updated. Also update your MaxelPay dashboard."
+        read -rp "  Restart bot now? (Y/n): " _r; _r="${_r:-Y}"
+        [[ "$_r" =~ ^[Yy]$ ]] && _require_compose && _dc up -d --force-recreate bot && _ok "Bot restarted."
+        _press ;;
+      4)
+        local _port; _port=$(_env_read "$ENV_FILE" "WEBHOOK_PORT" "9988")
+        echo ""
+        _info "Testing http://127.0.0.1:${_port}/health ..."
+        if curl -sf --max-time 5 "http://127.0.0.1:${_port}/health" &>/dev/null; then
+          _ok "Webhook server is running ✓"
+        else
+          _err "Webhook server not responding."
+          _info "Check logs: Bot Control → [5] Live logs"
+        fi
+        _press ;;
+      0) return ;;
+      *) _warn "Invalid option." ;;
+    esac
+  done
+}
+
+# ────────────────────────────────────────────────────────────────
+#  Web Panel helpers
+# ────────────────────────────────────────────────────────────────
+_gen_webpath() {
+  local chars='abcdefghijklmnopqrstuvwxyz0123456789'
+  local result=""
+  for _ in $(seq 1 12); do result+="${chars:RANDOM%${#chars}:1}"; done
+  echo "/${result}"
+}
+
+_panel_install_nodejs() {
+  if command -v node &>/dev/null; then
+    local _ver; _ver=$(node --version 2>/dev/null | tr -d 'v' | cut -d. -f1)
+    (( _ver >= 20 )) && { _ok "Node.js $(node --version) already installed."; return 0; }
+    _warn "Node.js $(node --version) too old — upgrading to v20..."
+  else
+    _info "Installing Node.js 20..."
+  fi
+  local _pkg="yum"
+  command -v apt-get &>/dev/null && _pkg="apt"
+  command -v dnf &>/dev/null && _pkg="dnf"
+  case "$_pkg" in
+    apt) curl -fsSL https://deb.nodesource.com/setup_20.x | bash - &>/dev/null; apt-get install -y nodejs &>/dev/null ;;
+    dnf) curl -fsSL https://rpm.nodesource.com/setup_20.x | bash - &>/dev/null; dnf install -y nodejs &>/dev/null ;;
+    *)   curl -fsSL https://rpm.nodesource.com/setup_20.x | bash - &>/dev/null; yum install -y nodejs &>/dev/null ;;
+  esac
+  command -v node &>/dev/null && _ok "Node.js $(node --version) installed." || { _err "Node.js install failed."; return 1; }
+}
+
+_panel_install_pnpm() {
+  command -v pnpm &>/dev/null && { _ok "pnpm $(pnpm --version) ready."; return 0; }
+  _info "Installing pnpm..."
+  npm install -g pnpm@latest &>/dev/null
+  command -v pnpm &>/dev/null && _ok "pnpm installed." || { _err "pnpm install failed."; return 1; }
+}
+
+_read_bot_env_vars() {
+  _BOT_TOKEN=$(_env_read "$ENV_FILE" "BOT_TOKEN" "")
+  _ADMIN_IDS=$(_env_read "$ENV_FILE" "ADMIN_IDS" "")
+  _PANEL_URL=$(_env_read "$ENV_FILE" "PANEL_URL" "")
+  _PANEL_USERNAME=$(_env_read "$ENV_FILE" "PANEL_USERNAME" "admin")
+  _PANEL_PASSWORD=$(_env_read "$ENV_FILE" "PANEL_PASSWORD" "")
+  _SUB_PORT=$(_env_read "$ENV_FILE" "SUB_PORT" "")
+  _WEBHOOK_PORT=$(_env_read "$ENV_FILE" "WEBHOOK_PORT" "9988")
+  # مسیر DB
+  _BOT_DB_PATH="/opt/nexora-bot/data/bot_data.db"
+  local _vol_db="/var/lib/docker/volumes/nexora_bot_data/_data/bot_data.db"
+  local _std_db="/opt/nexora-bot/data/bot_data.db"
+  [[ -f "$_vol_db" ]] && _BOT_DB_PATH="$_vol_db"
+  [[ -f "$_std_db" ]] && _BOT_DB_PATH="$_std_db"
+}
+
+_write_panel_env() {
+  local _wpath="$1" _wuser="$2" _wpass="$3" _wport="$4" _wenabled="${5:-true}"
+  _read_bot_env_vars
+  mkdir -p "$PANEL_DIR"
+  cat > "$PANEL_ENV_LOCAL" <<ENVEOF
+NODE_ENV=production
+WEB_PANEL_ENABLED=${_wenabled}
+WEB_PANEL_PATH=${_wpath}
+WEB_PANEL_USER=${_wuser}
+WEB_PANEL_PASS=${_wpass}
+WEB_PANEL_PORT=${_wport}
+BOT_TOKEN=${_BOT_TOKEN}
+ADMIN_IDS=${_ADMIN_IDS}
+PANEL_URL=${_PANEL_URL}
+PANEL_USERNAME=${_PANEL_USERNAME}
+PANEL_PASSWORD=${_PANEL_PASSWORD}
+SUB_PORT=${_SUB_PORT}
+WEBHOOK_PORT=${_WEBHOOK_PORT}
+BOT_DB_PATH=${_BOT_DB_PATH}
+ENVEOF
+  chmod 600 "$PANEL_ENV_LOCAL"
+  _ok "Panel .env.local written (bot vars synced)."
+}
+
+_panel_full_install() {
+  local _wpath="$1" _wuser="$2" _wpass="$3" _wport="$4"
+  local _saved_dir; _saved_dir="$BOT_DIR"
+  echo ""
+  command -v rsync &>/dev/null || apt-get install -y -qq rsync 2>/dev/null || yum install -y rsync 2>/dev/null || true
+  _info "Step 1/5 — Installing Node.js..."
+  _panel_install_nodejs || { cd "$_saved_dir" 2>/dev/null; return 1; }
+  _info "Step 2/5 — Installing pnpm..."
+  _panel_install_pnpm || { cd "$_saved_dir" 2>/dev/null; return 1; }
+  _info "Step 3/5 — Copying panel source..."
+  local _panel_src="$BOT_DIR/.."
+
+  # ── روش ۱: فایل‌های پنل یک لول بالاتر (ساختار dev / git clone) ──
+  if [[ -f "$_panel_src/package.json" ]]; then
+    rm -rf "$PANEL_DIR"
+    mkdir -p "$PANEL_DIR"
+    rsync -a --exclude='.git' --exclude='bot/' --exclude='node_modules/' \
+      --exclude='.next/' --exclude='attachements/' "$_panel_src/" "$PANEL_DIR/"
+    _ok "Source copied from parent directory."
+
+  # ── روش ۲: nexora-panel.zip کنار nexo-bot / در BOT_DIR ──────────
+  else
+    local _pzip=""
+    for _c in \
+        "$BOT_DIR/nexora-panel.zip" \
+        "$(dirname "$(realpath "${BASH_SOURCE[0]}" 2>/dev/null || echo "$0")")/nexora-panel.zip" \
+        "/tmp/nexora-panel.zip"; do
+      [[ -f "$_c" ]] && { _pzip="$_c"; break; }
+    done
+
+    if [[ -z "$_pzip" ]]; then
+      _err "Panel source not found. Place nexora-panel.zip next to nexo-bot and retry."
+      cd "$_saved_dir" 2>/dev/null; return 1
+    fi
+
+    _info "Extracting panel from: $_pzip"
+    command -v unzip &>/dev/null || apt-get install -y -qq unzip 2>/dev/null || yum install -y unzip 2>/dev/null || true
+    rm -rf "$PANEL_DIR"
+    mkdir -p "$PANEL_DIR"
+    unzip -q "$_pzip" -d "$PANEL_DIR"
+
+    # اگه unzip یک زیرپوشه ساخت، محتوا رو به بالا بیار
+    local _inner
+    _inner=$(find "$PANEL_DIR" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | head -1)
+    if [[ -n "$_inner" && -f "$_inner/package.json" ]]; then
+      rsync -a "$_inner/" "$PANEL_DIR/"
+      rm -rf "$_inner"
+    fi
+
+    if [[ ! -f "$PANEL_DIR/package.json" ]]; then
+      _err "Invalid nexora-panel.zip — package.json not found after extraction"
+      cd "$_saved_dir" 2>/dev/null; return 1
+    fi
+    _ok "Source extracted from zip."
+  fi
+  _info "Step 4/5 — Installing dependencies..."
+  ( cd "$PANEL_DIR" && pnpm install --no-frozen-lockfile --ignore-scripts 2>&1 | tail -5 ) \
+    || { _err "pnpm install failed."; cd "$_saved_dir" 2>/dev/null; return 1; }
+  ( cd "$PANEL_DIR" && pnpm rebuild better-sqlite3 2>&1 | tail -3 ) || true
+  _info "Step 5/5 — Building panel (production)..."
+  ( cd "$PANEL_DIR" && NODE_ENV=production pnpm build 2>&1 | tail -8 ) \
+    || { _err "pnpm build failed."; cd "$_saved_dir" 2>/dev/null; return 1; }
+  _ok "Build complete."
+  _write_panel_env "$_wpath" "$_wuser" "$_wpass" "$_wport" "true"
+  local _pnpm_bin; _pnpm_bin=$(command -v pnpm)
+  cat > "/etc/systemd/system/${PANEL_SYSTEMD_SERVICE}.service" <<SVCEOF
+[Unit]
+Description=Nexora Web Admin Panel
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=${PANEL_DIR}
+ExecStart=${_pnpm_bin} start
+Restart=always
+RestartSec=5
+EnvironmentFile=${PANEL_ENV_LOCAL}
+Environment=NODE_ENV=production
+Environment=PORT=${_wport}
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+  systemctl daemon-reload
+  systemctl enable "$PANEL_SYSTEMD_SERVICE" &>/dev/null
+  systemctl restart "$PANEL_SYSTEMD_SERVICE"
+  sleep 4
+  systemctl is-active "$PANEL_SYSTEMD_SERVICE" &>/dev/null \
+    && _ok "Panel service is running!" \
+    || _warn "Service issue. Check: journalctl -u ${PANEL_SYSTEMD_SERVICE} -n 30"
+  command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "active" \
+    && ufw allow "${_wport}/tcp" &>/dev/null && _ok "UFW: port ${_wport} opened." || true
+  command -v firewall-cmd &>/dev/null \
+    && firewall-cmd --permanent --add-port="${_wport}/tcp" &>/dev/null \
+    && firewall-cmd --reload &>/dev/null && _ok "firewalld: port ${_wport} opened." || true
+  cd "$_saved_dir" 2>/dev/null; return 0
+}
+
+_panel_apply_env() {
+  command -v systemctl &>/dev/null || return 0
+  [[ -f "/etc/systemd/system/${PANEL_SYSTEMD_SERVICE}.service" ]] || return 0
+  local _wpath _wuser _wpass _wport _wenabled
+  local _cfg_src; _cfg_src=$( [[ -f "$PANEL_ENV_LOCAL" ]] && echo "$PANEL_ENV_LOCAL" || echo "$ENV_FILE" )
+  _wenabled=$(_env_read "$_cfg_src" "WEB_PANEL_ENABLED" "true")
+  _wpath=$(_env_read "$_cfg_src"    "WEB_PANEL_PATH"    "/nexora")
+  _wuser=$(_env_read "$_cfg_src"    "WEB_PANEL_USER"    "admin")
+  _wpass=$(_env_read "$_cfg_src"    "WEB_PANEL_PASS"    "")
+  _wport=$(_env_read "$_cfg_src"    "WEB_PANEL_PORT"    "3000")
+  _write_panel_env "$_wpath" "$_wuser" "$_wpass" "$_wport" "$_wenabled"
+  # حذف PORT تکراری از service unit
+  sed -i '/^Environment=PORT=/d' "/etc/systemd/system/${PANEL_SYSTEMD_SERVICE}.service" 2>/dev/null || true
+  sed -i "/^Environment=NODE_ENV=/a Environment=PORT=${_wport}" \
+    "/etc/systemd/system/${PANEL_SYSTEMD_SERVICE}.service" 2>/dev/null || true
+  systemctl daemon-reload
+  if [[ "$_wenabled" == "true" ]]; then
+    systemctl restart "$PANEL_SYSTEMD_SERVICE" 2>/dev/null \
+      && _ok "Panel service restarted." || _warn "Could not restart panel."
+  else
+    systemctl stop "$PANEL_SYSTEMD_SERVICE" 2>/dev/null && _ok "Panel stopped." || true
+  fi
+}
+
+# ────────────────────────────────────────────────────────────────
+#  [9] Web Panel Manager
+# ────────────────────────────────────────────────────────────────
+_menu_webpanel() {
+  while true; do
+    _banner
+    echo -e "  ${BOLD}🌐  Web Panel Manager${RESET}"
+    _line
+    _panel_status
+    echo ""
+    if _panel_is_enabled; then
+      echo -e "  ${BOLD}[1]${RESET}  Disable Web Panel"
+      echo -e "  ${BOLD}[2]${RESET}  Change username / password"
+      echo -e "  ${BOLD}[3]${RESET}  Change web path  (security)"
+      echo -e "  ${BOLD}[4]${RESET}  Change port"
+      echo -e "  ${BOLD}[5]${RESET}  Show access URL"
+      echo -e "  ${BOLD}[6]${RESET}  Restart panel service"
+      echo -e "  ${BOLD}[7]${RESET}  View panel logs  (last 50 lines)"
+      echo -e "  ${BOLD}[8]${RESET}  Sync .env.local  (re-apply bot vars to panel)"
+      echo -e "  ${BOLD}[9]${RESET}  Rebuild & reinstall panel  (after code update)"
+    else
+      echo -e "  ${BOLD}[1]${RESET}  ${GREEN}Enable / Install Web Panel${RESET}"
+    fi
+    echo -e "  ${BOLD}[0]${RESET}  ${DIM}Back${RESET}"
+    _line
+    read -rp "  Choose: " ch
+
+    if ! _panel_is_enabled; then
+      case $ch in
+        1)
+          echo ""
+          local _suggested_path; _suggested_path=$(_gen_webpath)
+          echo -e "  ${BOLD}Web Path${RESET}  ${DIM}(security key — random suggestion below)${RESET}"
+          echo -e "  ${DIM}Suggestion: ${CYAN}${_suggested_path}${RESET}  ${DIM}(Enter to use or type your own)${RESET}"
+          read -rp "  Web Path: " _wpath
+          _wpath="${_wpath:-$_suggested_path}"
+          _wpath="/${_wpath#/}"
+          read -rp "  Admin username [default: admin]: " _wuser
+          _wuser="${_wuser:-admin}"
+          echo -e "  ${BOLD}Admin password${RESET}  ${DIM}(min 8 characters)${RESET}"
+          while true; do
+            read -rsp "  Password: " _wpass; echo ""
+            (( ${#_wpass} >= 8 )) && break
+            _warn "Password must be at least 8 characters."
+          done
+          read -rsp "  Confirm password: " _wpass2; echo ""
+          if [[ "$_wpass" != "$_wpass2" ]]; then _err "Passwords do not match."; _press; continue; fi
+          read -rp "  Port [default: 3000]: " _wport; _wport="${_wport:-3000}"
+          _panel_full_install "$_wpath" "$_wuser" "$_wpass" "$_wport" || { _err "Installation failed."; _press; continue; }
+          _env_set "$PANEL_ENV_KEY_ENABLED" "true"
+          _env_set "$PANEL_ENV_KEY_PATH"    "$_wpath"
+          _env_set "$PANEL_ENV_KEY_USER"    "$_wuser"
+          _env_set "$PANEL_ENV_KEY_PASS"    "$_wpass"
+          _env_set "$PANEL_ENV_KEY_PORT"    "$_wport"
+          echo ""
+          echo -e "  ${GREEN}${BOLD}✔  Web Panel is ready!${RESET}"
+          _line
+          local _my_ip; _my_ip=$(curl -s4 --max-time 5 ifconfig.me 2>/dev/null || echo "YOUR_IP")
+          _info "URL: http://${_my_ip}:${_wport}${_wpath}"
+          _info "User: ${_wuser}"
+          _warn "Keep the web path secret!"
+          _press ;;
+        0) return ;;
+        *) _warn "Invalid option." ;;
+      esac
+    else
+      case $ch in
+        1)
+          _write_panel_env \
+            "$(_env_read "$PANEL_ENV_LOCAL" "WEB_PANEL_PATH" "/nexora")" \
+            "$(_env_read "$PANEL_ENV_LOCAL" "WEB_PANEL_USER" "admin")" \
+            "$(_env_read "$PANEL_ENV_LOCAL" "WEB_PANEL_PASS" "")" \
+            "$(_env_read "$PANEL_ENV_LOCAL" "WEB_PANEL_PORT" "3000")" \
+            "false"
+          _env_set "$PANEL_ENV_KEY_ENABLED" "false"
+          systemctl stop "$PANEL_SYSTEMD_SERVICE" 2>/dev/null || true
+          _ok "Web Panel disabled." && _press ;;
+        2)
+          read -rp "  New username [Enter to keep]: " _wu
+          [[ -n "$_wu" ]] && _env_set "WEB_PANEL_USER" "$_wu" "$PANEL_ENV_LOCAL" && _env_set "$PANEL_ENV_KEY_USER" "$_wu"
+          echo -e "  ${BOLD}New password${RESET}  ${DIM}(min 8 chars, Enter to skip)${RESET}"
+          read -rsp "  Password: " _wp; echo ""
+          if (( ${#_wp} >= 8 )); then
+            read -rsp "  Confirm: " _wp2; echo ""
+            if [[ "$_wp" == "$_wp2" ]]; then
+              _env_set "WEB_PANEL_PASS" "$_wp" "$PANEL_ENV_LOCAL"
+              _env_set "$PANEL_ENV_KEY_PASS" "$_wp"
+              _panel_apply_env
+              _ok "Credentials updated."
+            else
+              _err "Passwords do not match."
+            fi
+          elif [[ -n "$_wp" ]]; then
+            _warn "Password too short — not changed."
+          fi
+          _press ;;
+        3)
+          read -rp "  New web path (e.g. /secretadmin): " _newpath
+          _newpath="/${_newpath#/}"
+          _env_set "WEB_PANEL_PATH" "$_newpath" "$PANEL_ENV_LOCAL"
+          _env_set "$PANEL_ENV_KEY_PATH" "$_newpath"
+          _panel_apply_env
+          _ok "Web path updated: $_newpath" && _press ;;
+        4)
+          local _cur_port; _cur_port=$(_env_read "$PANEL_ENV_LOCAL" "WEB_PANEL_PORT" "3000")
+          read -rp "  New port [current: ${_cur_port}]: " _np
+          if [[ -n "$_np" ]]; then
+            _env_set "WEB_PANEL_PORT" "$_np" "$PANEL_ENV_LOCAL"
+            _env_set "$PANEL_ENV_KEY_PORT" "$_np"
+            _panel_apply_env
+            _ok "Port updated → panel restarted."
+          fi
+          _press ;;
+        5)
+          local _pp; _pp=$(_env_read "$PANEL_ENV_LOCAL" "WEB_PANEL_PATH" "/nexora")
+          local _pport; _pport=$(_env_read "$PANEL_ENV_LOCAL" "WEB_PANEL_PORT" "3000")
+          local _panel_dom; _panel_dom=$(_env_read "$ENV_FILE" "WEB_PANEL_DOMAIN" "")
+          local _my_ip2; _my_ip2=$(curl -s4 --max-time 5 ifconfig.me 2>/dev/null || echo "YOUR_IP")
+          echo ""
+          _info "HTTP  : http://${_my_ip2}:${_pport}${_pp}"
+          [[ -n "$_panel_dom" ]] && _info "HTTPS : https://${_panel_dom}${_pp}"
+          _press ;;
+        6)
+          systemctl restart "$PANEL_SYSTEMD_SERVICE" 2>/dev/null \
+            && _ok "Panel restarted." \
+            || _err "Restart failed. Check: journalctl -u $PANEL_SYSTEMD_SERVICE -n 20"
+          _press ;;
+        7)
+          echo ""
+          _info "Last 50 lines of panel logs:"
+          echo ""
+          journalctl -u "$PANEL_SYSTEMD_SERVICE" -n 50 --no-pager 2>/dev/null \
+            || _warn "journalctl not available."
+          _press ;;
+        8)
+          _info "Syncing bot .env vars to panel .env.local..."
+          local _wpath_s; _wpath_s=$(_env_read "$PANEL_ENV_LOCAL" "WEB_PANEL_PATH" "/nexora")
+          local _wuser_s; _wuser_s=$(_env_read "$PANEL_ENV_LOCAL" "WEB_PANEL_USER" "admin")
+          local _wpass_s; _wpass_s=$(_env_read "$PANEL_ENV_LOCAL" "WEB_PANEL_PASS" "")
+          local _wport_s; _wport_s=$(_env_read "$PANEL_ENV_LOCAL" "WEB_PANEL_PORT" "3000")
+          _write_panel_env "$_wpath_s" "$_wuser_s" "$_wpass_s" "$_wport_s" "true"
+          _panel_apply_env
+          _ok "Sync complete — panel restarted." && _press ;;
+        9)
+          echo ""
+          _warn "This will rebuild the panel from source. Current settings will be preserved."
+          read -rp "  Continue? (y/N): " _conf
+          [[ "$_conf" =~ ^[Yy]$ ]] || { _press; continue; }
+          local _wpath_r; _wpath_r=$(_env_read "$PANEL_ENV_LOCAL" "WEB_PANEL_PATH" "/nexora")
+          local _wuser_r; _wuser_r=$(_env_read "$PANEL_ENV_LOCAL" "WEB_PANEL_USER" "admin")
+          local _wpass_r; _wpass_r=$(_env_read "$PANEL_ENV_LOCAL" "WEB_PANEL_PASS" "")
+          local _wport_r; _wport_r=$(_env_read "$PANEL_ENV_LOCAL" "WEB_PANEL_PORT" "3000")
+          _panel_full_install "$_wpath_r" "$_wuser_r" "$_wpass_r" "$_wport_r" \
+            && _ok "Rebuild complete." || _err "Rebuild failed."
+          _press ;;
+        0) return ;;
+        *) _warn "Invalid option." ;;
+      esac
+    fi
+  done
+}
+
+# ────────────────────────────────────────────────────────────────
+#  [6] Uninstall
+# ────────────────────────────────────────────────────────────────
+_menu_uninstall() {
+  _banner
+  echo -e "  ${RED}${BOLD}⚠️   UNINSTALL — Complete Removal${RESET}"
+  _line
+  echo -e "  ${YELLOW}This will permanently delete:${RESET}"
+  echo -e "  • Docker containers  (nexora_bot, nexora_postgres)"
+  echo -e "  • Docker image       (nexora-vpn-bot)"
+  echo -e "  • Docker volumes     (all data & logs)"
+  echo -e "  • Bot directory      ($BOT_DIR)"
+  echo -e "  • nexo-bot command   (/usr/local/bin/nexo-bot)"
+  echo -e "  • Web panel          ($PANEL_DIR)"
+  echo -e "  • Panel service      (systemd: ${PANEL_SYSTEMD_SERVICE})"
+  echo -e "  • nginx config       (/etc/nginx/conf.d/nexora-panel.conf)"
+  echo ""
+  echo -e "  ${RED}${BOLD}THIS CANNOT BE UNDONE.${RESET}"
+  _line
+  read -rp "  Type  DELETE  to confirm: " confirm
+  [[ "$confirm" != "DELETE" ]] && { _warn "Cancelled."; _press; return; }
+  echo ""
+  _info "Stopping containers..."
+  docker compose -f "$COMPOSE_FILE" --profile postgres down -v --remove-orphans 2>/dev/null || true
+  _info "Removing image..."
+  docker rmi nexora-vpn-bot:latest 2>/dev/null || true
+  if systemctl is-active "$PANEL_SYSTEMD_SERVICE" &>/dev/null; then
+    systemctl stop "$PANEL_SYSTEMD_SERVICE" 2>/dev/null || true
+  fi
+  if systemctl is-enabled "$PANEL_SYSTEMD_SERVICE" &>/dev/null; then
+    systemctl disable "$PANEL_SYSTEMD_SERVICE" 2>/dev/null || true
+  fi
+  if [[ -f "/etc/systemd/system/${PANEL_SYSTEMD_SERVICE}.service" ]]; then
+    rm -f "/etc/systemd/system/${PANEL_SYSTEMD_SERVICE}.service"
+    systemctl daemon-reload 2>/dev/null || true
+  fi
+  [[ -d "$PANEL_DIR" ]] && rm -rf "$PANEL_DIR" && _ok "Panel directory removed."
+  [[ -f "/etc/nginx/conf.d/nexora-panel.conf" ]] && rm -f "/etc/nginx/conf.d/nexora-panel.conf" \
+    && systemctl is-active nginx &>/dev/null && nginx -t 2>/dev/null && systemctl reload nginx 2>/dev/null || true
+  local _panel_port; _panel_port=$(_env_read "$ENV_FILE" "WEB_PANEL_PORT" "")
+  if [[ -n "$_panel_port" ]]; then
+    command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "active" \
+      && ufw delete allow "${_panel_port}/tcp" &>/dev/null && _ok "UFW: port removed." || true
+    command -v firewall-cmd &>/dev/null \
+      && firewall-cmd --permanent --remove-port="${_panel_port}/tcp" &>/dev/null \
+      && firewall-cmd --reload &>/dev/null && _ok "firewalld: port removed." || true
+  fi
+  _info "Removing bot directory..."
+  rm -rf "$BOT_DIR"
+  _info "Removing nexo-bot command..."
+  rm -f /usr/local/bin/nexo-bot
+  echo ""
+  echo -e "  ${GREEN}${BOLD}✔  Nexora VPN Bot fully removed.${RESET}"
+  echo ""
+  exit 0
+}
+
+# ────────────────────────────────────────────────────────────────
+#  MAIN MENU
+# ────────────────────────────────────────────────────────────────
+main() {
+  while true; do
+    _banner
+    _status_bar
+    _panel_status
+    echo ""
+    echo -e "  ${BOLD}[1]${RESET}  🤖  Bot Control      (start / stop / restart / logs)"
+    echo -e "  ${BOLD}[2]${RESET}  ⚙️   Configuration    (edit .env / validate)"
+    echo -e "  ${BOLD}[3]${RESET}  🗄   Database         (info / migrate / backup)"
+    echo -e "  ${BOLD}[4]${RESET}  💾  Backup & Restore"
+    echo -e "  ${BOLD}[5]${RESET}  📊  System Info"
+    echo -e "  ${BOLD}[6]${RESET}  ${RED}🗑   Uninstall${RESET}        (remove everything)"
+    echo -e "  ${BOLD}[7]${RESET}  🔒  SSL Manager       (Let's Encrypt certificate)"
+    echo -e "  ${BOLD}[8]${RESET}  🔗  Webhook Manager   (manage webhook URLs)"
+    echo -e "  ${BOLD}[9]${RESET}  🌐  Web Panel         (enable / manage admin panel)"
+    echo -e "  ${BOLD}[0]${RESET}  ${DIM}Exit${RESET}"
+    _line
+    echo -e "  ${DIM}Dir: $BOT_DIR${RESET}"
+    echo ""
+    read -rp "  Choose: " ch
+    case $ch in
+      1) _menu_control ;;
+      2) _menu_config ;;
+      3) _menu_database ;;
+      4) _menu_backup ;;
+      5) _menu_sysinfo ;;
+      6) _menu_uninstall ;;
+      7) _menu_ssl ;;
+      8) _menu_webhook ;;
+      9) _menu_webpanel ;;
+      0) echo ""; exit 0 ;;
+      *) _warn "Invalid option." ;;
+    esac
+  done
+}
+
+main
