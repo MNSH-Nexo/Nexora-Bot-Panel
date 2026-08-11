@@ -204,18 +204,30 @@ async def create_new_subscription(
         api_path=settings.panel_api_path,
         sub_port=settings.sub_port,
     ) as xui:
-        # اینباند اول برای دریافت sub_id و اطلاعات اصلی
+        # اعتبارسنجی اینباندها — فیلتر کردن اینباندهایی که در پنل وجود دارند
+        panel_inbounds = await xui.get_inbounds()
+        panel_inbound_ids = {inb.id for inb in panel_inbounds if inb.enable}
+
+        # فیلتر target_inbound_ids به فقط اینباندهای موجود و فعال در پنل
+        valid_inbound_ids = [iid for iid in target_inbound_ids if iid in panel_inbound_ids]
+
+        if not valid_inbound_ids:
+            # هیچ‌کدام از اینباندهای تنظیم‌شده در پنل وجود ندارند
+            logger.warning(
+                "inbound validation failed: %s not in panel. "
+                "panel active ids: %s. using first active.",
+                target_inbound_ids, sorted(panel_inbound_ids),
+            )
+            if not panel_inbound_ids:
+                raise XUIError("هیچ اینباند فعالی در پنل یافت نشد.")
+            valid_inbound_ids = [sorted(panel_inbound_ids)[0]]
+
+        if len(valid_inbound_ids) < len(target_inbound_ids):
+            removed = set(target_inbound_ids) - set(valid_inbound_ids)
+            logger.warning("inbounds %s not found in panel, skipped.", removed)
+
+        target_inbound_ids = valid_inbound_ids
         first_inbound_id = target_inbound_ids[0]
-        inbound = await xui.get_inbound(first_inbound_id)
-        if not inbound.enable:
-            # اگه اینباند اول غیرفعال بود، اولی رو که فعاله پیدا کن
-            for iid in target_inbound_ids[1:]:
-                ib = await xui.get_inbound(iid)
-                if ib.enable:
-                    first_inbound_id = iid
-                    break
-            else:
-                raise XUIError("هیچ اینباند فعالی پیدا نشد.")
 
         # ── تولید email و retry در صورت تکراری بودن ──────────────
         # هر بار یک پسوند رندوم جدید تولید می‌شود تا یکتایی تضمین شود

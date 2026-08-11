@@ -29,6 +29,7 @@ from database.crud import (
 )
 from services.card_payment import calc_rial_amount, fmt_card_number, get_card_info
 from services.subscription import create_new_subscription
+from services.referral import after_purchase_referral_hook
 
 router = Router(name="card_payment")
 
@@ -302,6 +303,11 @@ async def cb_card_approve(callback: CallbackQuery) -> None:
                 username=user.username,
             )
             await update_payment_status(session, payment.id, "confirmed", result.subscription.id)
+            # referral hook
+            try:
+                await after_purchase_referral_hook(user_id=user.id, bot=callback.bot)
+            except Exception as _ref_err:
+                logger.warning(f"referral hook (card_payment): {_ref_err}")
         except Exception as e:
             logger.error(f"خطا در ایجاد اشتراک بعد از تأیید کارت {order_id}: {e}")
             await processing.edit_text(

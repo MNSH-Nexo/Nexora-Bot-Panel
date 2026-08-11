@@ -1834,51 +1834,82 @@ fi
 # ──────────────────────────────────────────────────────────────
 #  DONE
 # ──────────────────────────────────────────────────────────────
-echo ""
-echo -e "${GREEN}${BOLD}"
-echo "  ╔══════════════════════════════════════════════════════════╗"
-echo "  ║       ✔  NEXORA VPN BOT — INSTALLATION COMPLETE         ║"
-echo "  ║       Hybrid Stable v1.8 · Built by MNSH-Nexo           ║"
-echo "  ╚══════════════════════════════════════════════════════════╝"
-echo -e "${RESET}"
-echo -e "  ${BOLD}Bot installed at:${RESET}  ${CYAN}$INSTALL_DIR${RESET}"
-echo -e "  ${BOLD}Manage with:${RESET}       ${CYAN}nexo-bot${RESET}"
-echo ""
-echo -e "  ${BOLD}Next steps:${RESET}"
-echo -e "  1. Open Telegram → message your bot"
-echo -e "  2. Login as admin: /admin_secret ****  ${DIM}(see ADMIN_SECRET in .env)${RESET}"
-echo -e "  3. Type ${CYAN}nexo-bot${RESET} anytime to manage"
-echo ""
 
+# ─ Detect public IP ─
+_get_server_ip() {
+  local _raw
+  _raw=$(curl -s4 --max-time 5 ifconfig.me 2>/dev/null ||          curl -s4 --max-time 5 icanhazip.com 2>/dev/null ||          curl -s4 --max-time 5 api.ipify.org 2>/dev/null || true)
+  if echo "$_raw" | grep -qE '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'; then
+    echo "$_raw"
+  else
+    hostname -I 2>/dev/null | awk '{print $1}' || echo "YOUR_IP"
+  fi
+}
+_srv_ip=$(_get_server_ip)
+
+clear
+echo -e "${CYAN}${BOLD}"
+echo '    ███╗   ██╗███████╗██╗  ██╗ ██████╗ ██████╗  █████╗ '
+echo '    ████╗  ██║██╔════╝╚██╗██╔╝██╔═══██╗██╔══██╗██╔══██╗'
+echo '    ██╔██╗ ██║█████╗   ╚███╔╝ ██║   ██║██████╔╝███████║'
+echo '    ██║╚██╗██║██╔══╝   ██╔██╗ ██║   ██║██╔══██╗██╔══██║'
+echo '    ██║ ╚████║███████╗██╔╝ ██╗╚██████╔╝██║  ██║██║  ██║'
+echo '    ╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝'
+echo -e "${RESET}"
+echo -e "${GREEN}${BOLD}"
+echo '  ╔══════════════════════════════════════════════════════════╗'
+echo '  ║       ✦  نصب با موفقیت کامل شد · Installation Done  ✦  ║'
+echo '  ╚══════════════════════════════════════════════════════════╝'
+echo -e "${RESET}"
+echo -e "  ${DIM}  ممنون که از Nexora-Bot استفاده می‌کنید  🙏${RESET}"
+echo ''
+
+# ── Bot Info Box ─────────────────────────────────────────────
+echo -e "${BOLD}${YELLOW}  ▸ ربات تلگرام${RESET}"
+echo -e "  ${DIM}┌──────────────────────────────────────────────────────┐${RESET}"
+echo -e "  │  ${GREEN}✔${RESET}  مسیر نصب  :  ${CYAN}$INSTALL_DIR${RESET}"
+echo -e "  │  ${GREEN}✔${RESET}  دستور CLI  :  ${CYAN}nexo-bot${RESET}"
+echo -e "  ${DIM}└──────────────────────────────────────────────────────┘${RESET}"
+echo ''
+
+# ── Web Panel Box ─────────────────────────────────────────────
 if [[ "$WEB_PANEL_INSTALLED" == "true" ]]; then
-  _get_server_ip() {
-    local _raw
-    _raw=$(curl -s4 --max-time 5 ifconfig.me 2>/dev/null || \
-           curl -s4 --max-time 5 icanhazip.com 2>/dev/null || \
-           curl -s4 --max-time 5 api.ipify.org 2>/dev/null || true)
-    if echo "$_raw" | grep -qE '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'; then
-      echo "$_raw"
-    else
-      hostname -I 2>/dev/null | awk '{print $1}' || echo "YOUR_IP"
-    fi
-  }
-  _ip=$(_get_server_ip)
-  echo -e "  ${BOLD}🌐  Web Panel:${RESET}"
-  echo -e "  • URL  : ${CYAN}http://${_ip}:${WEB_PANEL_PORT_FINAL}${WEB_PANEL_PATH_FINAL}${RESET}"
-  echo -e "  • Path : ${YELLOW}${WEB_PANEL_PATH_FINAL}${RESET}  ${DIM}← keep this secret!${RESET}"
-  echo -e "  • Logs : ${CYAN}journalctl -u nexora-panel -f${RESET}"
+  echo -e "${BOLD}${YELLOW}  ▸ وب پنل مدیریت${RESET}"
+  echo -e "  ${DIM}┌──────────────────────────────────────────────────────┐${RESET}"
+  echo -e "  │  ${GREEN}✔${RESET}  آدرس پنل   :  ${CYAN}http://${_srv_ip}:${WEB_PANEL_PORT_FINAL}${WEB_PANEL_PATH_FINAL}${RESET}"
+  echo -e "  │  ${GREEN}✔${RESET}  نام کاربری :  ${YELLOW}${_wp_user:-admin}${RESET}"
+  echo -e "  │  ${GREEN}✔${RESET}  رمز عبور   :  ${YELLOW}${_wpass:-<see .env>}${RESET}"
+  echo -e "  │  ${YELLOW}⚠${RESET}  ${DIM}مسیر پنل (secret path) را مخفی نگه دارید!${RESET}"
   if [[ -d /etc/letsencrypt/live ]]; then
     _dom=$(ls /etc/letsencrypt/live/ 2>/dev/null | grep -v "^README$" | head -1 || true)
-    [[ -n "$_dom" ]] && echo -e "  • HTTPS: ${CYAN}https://${_dom}${WEB_PANEL_PATH_FINAL}${RESET}"
+    [[ -n "$_dom" ]] && echo -e "  │  ${GREEN}✔${RESET}  HTTPS       :  ${CYAN}https://${_dom}${WEB_PANEL_PATH_FINAL}${RESET}"
   fi
-  echo ""
+  echo -e "  ${DIM}└──────────────────────────────────────────────────────┘${RESET}"
+  echo ''
 fi
 
-echo -e "  ${DIM}──────────────────────────────────────────────────────${RESET}"
-echo -e "  ${DIM}Useful commands:${RESET}"
-echo -e "  • Bot logs   : ${CYAN}docker compose -f $INSTALL_DIR/docker-compose.yml logs -f bot${RESET}"
-echo -e "  • Panel logs : ${CYAN}journalctl -u nexora-panel -f${RESET}"
-echo -e "  • Restart bot: ${CYAN}docker compose -f $INSTALL_DIR/docker-compose.yml restart bot${RESET}"
-echo ""
-echo -e "  ${DIM}Built by MNSH-Nexo · github.com/MNSH-Nexo${RESET}"
-echo ""
+# ── Quick Start Box ───────────────────────────────────────────
+echo -e "${BOLD}${YELLOW}  ▸ شروع سریع${RESET}"
+echo -e "  ${DIM}┌──────────────────────────────────────────────────────┐${RESET}"
+echo -e "  │  ①  تلگرام را باز کنید و به ربات پیام دهید"
+echo -e "  │  ②  دستور ادمین را بزنید تا وارد پنل شوید"
+echo -e "  │  ③  با دستور ${CYAN}nexo-bot${RESET} هر زمان ربات را مدیریت کنید"
+echo -e "  ${DIM}└──────────────────────────────────────────────────────┘${RESET}"
+echo ''
+
+# ── Useful Commands Box ───────────────────────────────────────
+echo -e "${BOLD}${YELLOW}  ▸ دستورهای مفید${RESET}"
+echo -e "  ${DIM}┌──────────────────────────────────────────────────────┐${RESET}"
+echo -e "  │  لاگ ربات     :  ${CYAN}docker compose -f $INSTALL_DIR/docker-compose.yml logs -f bot${RESET}"
+echo -e "  │  لاگ پنل      :  ${CYAN}journalctl -u nexora-panel -f${RESET}"
+echo -e "  │  ریستارت ربات :  ${CYAN}docker compose -f $INSTALL_DIR/docker-compose.yml restart bot${RESET}"
+echo -e "  │  مدیریت کلی   :  ${CYAN}nexo-bot${RESET}"
+echo -e "  ${DIM}└──────────────────────────────────────────────────────┘${RESET}"
+echo ''
+
+# ── Footer ────────────────────────────────────────────────────
+echo -e "  ${DIM}═══════════════════════════════════════════════════════${RESET}"
+echo -e "  ${DIM}   Built with ❤  by MNSH-Nexo  ·  github.com/MNSH-Nexo${RESET}"
+echo -e "  ${DIM}   Nexora-Bot  —  Your VPN automation partner  🚀${RESET}"
+echo -e "  ${DIM}═══════════════════════════════════════════════════════${RESET}"
+echo ''

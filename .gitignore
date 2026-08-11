@@ -1,0 +1,43 @@
+# ── اطلاعات محرمانه ──────────────────────────────────────
+.env
+.env.local
+.env.production
+.env.*.local
+
+# ── دیتابیس ────────────────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+data/
+logs/
+
+# ── Docker ─────────────────────────────────────────────
+docker-compose.override.yml
+
+# ── Python ─────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+venv/
+env/
+.venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+
+# ── OS / Editor ────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+*.orig
+
+# فایل‌های بک‌آپ موقت
+*.bak
+*.orig

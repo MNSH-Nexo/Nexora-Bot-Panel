@@ -6,9 +6,6 @@ services:
 
   # ── ربات تلگرام ──────────────────────────────
   bot:
-    build:
-      context: .
-      dockerfile: Dockerfile.bot
     image: nexora-vpn-bot:latest
     container_name: nexora_bot
     restart: unless-stopped

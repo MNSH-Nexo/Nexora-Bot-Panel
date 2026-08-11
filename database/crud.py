@@ -1038,3 +1038,17 @@ async def unban_user(session: AsyncSession, telegram_id: int) -> bool:
     user.updated_at = datetime.now(timezone.utc)
     await session.commit()
     return True
+
+
+# ──────────────────────────────────────────────
+# تعداد پرداخت‌های موفق یک کاربر (برای referral trigger)
+# ──────────────────────────────────────────────
+
+async def get_confirmed_payment_count(session: AsyncSession, user_id: int) -> int:
+    """تعداد پرداخت‌های confirmed یک کاربر — برای تشخیص اولین خرید."""
+    from sqlalchemy import func as sql_func
+    count = (await session.execute(
+        select(sql_func.count(Payment.id))
+        .where(Payment.user_id == user_id, Payment.status == "confirmed")
+    )).scalar() or 0
+    return int(count)

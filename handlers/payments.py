@@ -27,6 +27,7 @@ from database.crud import (
 from keyboards.plans import get_payment_status_keyboard
 from services.payments import PaymentError, crypto_payment_service
 from services.subscription import create_new_subscription
+from services.referral import after_purchase_referral_hook
 from utils.qrcode_gen import generate_qr_code
 
 router = Router(name="payments")
@@ -282,6 +283,12 @@ async def _confirm_payment_and_create_sub(
             await update_payment_status(
                 session, payment.id, "confirmed", result.subscription.id  # type: ignore[attr-defined]
             )
+
+        # referral hook
+        try:
+            await after_purchase_referral_hook(user_id=db_user.id, bot=callback.bot)
+        except Exception as _ref_err:
+            logger.warning(f"referral hook (payments): {_ref_err}")
 
         # ارسال QR Code کانفیگ
         qr_file = BufferedInputFile(file=result.qr_bytes, filename="vpn_qrcode.png")

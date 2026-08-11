@@ -85,6 +85,8 @@ from keyboards.admin import (
     get_admin_detail_keyboard, get_admin_revoke_confirm_keyboard,
     get_admin_lock_confirm_keyboard,
     get_user_ban_confirm_keyboard,
+    get_referral_settings_keyboard,
+    get_referral_plan_select_keyboard,
 )
 from keyboards.tickets import get_admin_ticket_keyboard
 from services.xui_api import XUIClient, XUIError
@@ -4160,6 +4162,12 @@ class TestSubEditStates(StatesGroup):
     waiting_value = State()
 
 
+class ReferralEditStates(StatesGroup):
+    waiting_days    = State()
+    waiting_traffic = State()
+    waiting_custom  = State()  # ترکیب traffic:days
+
+
 def _get_test_sub_keyboard(enabled: bool, traffic: float, days: int):
     from aiogram.utils.keyboard import InlineKeyboardBuilder
     kb = InlineKeyboardBuilder()
@@ -4438,7 +4446,7 @@ async def cb_adm_debug_ids(callback: CallbackQuery) -> None:
         f"🗄 وضعیت DB: {db_admin_status}\n\n"
         "ℹ️ اگه ADMIN_IDS خالی است، مشکل parse .env دارید.\n"
         "مطمئن شوید فایل .env روی سرور درست تنظیم شده:\n"
-        "<code>ADMIN_IDS=5797901827</code>\n\n"
+        "<code>ADMIN_IDS=123456789</code>\n\n"
         "بعد از تغییر .env باید container را restart کنید:\n"
         "<code>docker compose up -d</code>"
     )
@@ -4694,3 +4702,308 @@ async def cb_adm_mgr_revoke(callback: CallbackQuery) -> None:
         callback, text, parse_mode="HTML",
         reply_markup=get_admin_list_keyboard(db_admins, main_ids, uid),
     )
+
+
+# ══════════════════════════════════════════════
+# 🔗 تنظیمات Referral (دعوت دوستان)
+# ══════════════════════════════════════════════
+
+async def _show_referral_settings(target: CallbackQuery) -> None:
+    """نمایش صفحه تنظیمات referral."""
+    from database.crud import get_setting, get_all_plans
+    from services.referral import get_referral_settings
+
+    cfg = await get_referral_settings()
+    reward_type    = cfg["reward_type"]
+    trigger        = cfg["trigger"]
+    reward_plan_id = cfg["reward_plan_id"]
+    custom_traffic = cfg["custom_traffic"]
+    custom_days    = cfg["custom_days"]
+    inbound_id     = cfg["inbound_id"]
+
+    async with AsyncSessionLocal() as session:
+        all_plans = await get_all_plans(session)
+
+    inbound_name = ""
+    if inbound_id:
+        try:
+            async with _xui_client() as xui:
+                _inbs = await xui.get_inbounds()
+            for _inb in _inbs:
+                if _inb.id == inbound_id:
+                    inbound_name = _inb.remark
+                    break
+        except Exception:
+            pass
+
+    reward_plan_name = ""
+    for p in all_plans:
+        if p.id == reward_plan_id:
+            reward_plan_name = f"{p.name} ({p.traffic_gb}GB/{p.duration_days}روز)"
+            break
+
+    if reward_type == "plan":
+        type_display   = "📦 پلن رایگان کامل"
+        reward_display = reward_plan_name or "❌ انتخاب نشده"
+    else:
+        type_display   = "⚙️ کانفیگ دلخواه"
+        inb_part = f" — 🔌 {inbound_name}" if inbound_name else ""
+        reward_display = f"{custom_traffic:g} GB / {custom_days} روز{inb_part}"
+
+    trigger_labels = {
+        "on_register":       "📋 هنگام ثبت‌مام",
+        "on_first_purchase": "🛒 اولین خرید",
+        "on_every_purchase": "🔄 هر خرید",
+    }
+    trigger_display = trigger_labels.get(trigger, trigger)
+    enabled_display = "✅ فعال" if cfg["enabled"] else "❌ غیرفعال"
+    text = (
+        "🔗 <b>تنظیمات سیستم دعوت (Referral)</b>\n"
+        "━━━━━━━━━━━━━━━\n\n"
+        f"⚡️ <b>وضعیت:</b> {enabled_display}\n"
+        f"🎁 <b>نوع پاداش:</b> {type_display}\n"
+        f"💎 <b>پاداش:</b> {reward_display}\n"
+        f"🕐 <b>زمان اعطا:</b> {trigger_display}\n\n"
+        "<i>پاداش به دعوت‌کننده داده می‌شود، نه کاربر دعوت‌شده.</i>"
+    )
+
+    await _safe_edit_admin(
+        target, text, parse_mode="HTML",
+        reply_markup=get_referral_settings_keyboard(
+            reward_type=reward_type,
+            trigger=trigger,
+            reward_days=custom_days,
+            reward_plan_name=reward_plan_name,
+            custom_traffic=custom_traffic,
+            custom_days=custom_days,
+            inbound_name=inbound_name,
+        ),
+    )
+
+
+@router.callback_query(F.data == "adm_ref_settings")
+async def cb_adm_ref_settings(callback: CallbackQuery) -> None:
+    if not await _check_admin(callback):
+        return
+    await callback.answer()
+    await _show_referral_settings(callback)
+
+
+@router.callback_query(F.data.startswith("adm_ref_type:"))
+async def cb_adm_ref_type(callback: CallbackQuery) -> None:
+    """تغییر نوع پاداش: custom یا plan."""
+    if not await _check_admin(callback):
+        return
+    new_type = callback.data.split(":")[1]
+    if new_type not in ("custom", "plan", "days"):
+        await callback.answer("نوع نامضتبر", show_alert=True)
+        return
+    if new_type == "days":
+        new_type = "custom"
+    from database.crud import set_setting
+    from services.referral import REFERRAL_REWARD_TYPE_KEY
+    async with AsyncSessionLocal() as session:
+        await set_setting(session, REFERRAL_REWARD_TYPE_KEY, new_type)
+    await callback.answer("✅ ذخیره شد")
+    await _show_referral_settings(callback)
+
+
+@router.callback_query(F.data.startswith("adm_ref_trigger:"))
+async def cb_adm_ref_trigger(callback: CallbackQuery) -> None:
+    """تعییر trigger پاداش."""
+    if not await _check_admin(callback):
+        return
+    new_trigger = callback.data.split(":")[1]
+    if new_trigger not in ("on_register", "on_first_purchase", "on_every_purchase"):
+        await callback.answer("trigger نامضت اتبر", show_alert=True)
+        return
+    from database.crud import set_setting
+    from services.referral import REFERRAL_TRIGGER_KEY
+    async with AsyncSessionLocal() as session:
+        await set_setting(session, REFERRAL_TRIGGER_KEY, new_trigger)
+    await callback.answer("✅ ذخیره شد")
+    await _show_referral_settings(callback)
+
+
+@router.callback_query(F.data.startswith("adm_ref_edit:"))
+async def cb_adm_ref_edit(callback: CallbackQuery, state: FSMContext) -> None:
+    """شروع ویرایش حجم، روز یا اینباند referral."""
+    if not await _check_admin(callback):
+        return
+    await callback.answer()
+    field = callback.data.split(":")[1]
+
+    if field == "inbound":
+        from database.crud import get_setting
+        from services.referral import REFERRAL_INBOUND_ID_KEY
+        async with AsyncSessionLocal() as session:
+            inbound_id_raw = await get_setting(session, REFERRAL_INBOUND_ID_KEY, "0")
+        try:
+            current_id = int(inbound_id_raw) if inbound_id_raw else 0
+        except Exception:
+            current_id = 0
+        try:
+            async with _xui_client() as xui:
+                inbounds = await xui.get_inbounds()
+        except Exception as e:
+            await callback.message.answer(f"❌ خطا در دریافت اینباندها از پنل: {e}")
+            return
+        if not inbounds:
+            await callback.message.answer("⚠️ هیچ اینباندی در پنل یافت نشد.")
+            return
+        from keyboards.admin import get_referral_inbound_keyboard
+        await _safe_edit_admin(
+            callback,
+            "🔌 <b>اینباند پاداش referral را انتخاب کنید:</b>\n\nکانفیگ پاداش روی این اینباند ساخته می‌شود.",
+            parse_mode="HTML",
+            reply_markup=get_referral_inbound_keyboard(inbounds, current_id),
+        )
+        return
+
+    if field == "traffic":
+        from services.referral import get_referral_settings
+        cfg = await get_referral_settings()
+        t = cfg["custom_traffic"]
+        prompt = (
+            f"📦 <b>حجم پاداش را به GB وارد کنید:</b>\n"
+            f"مقدار فصلی: <code>{t:g} GB</code>\n\n"
+            "مثال: <code>5</code> یا <code>10</code>\n"
+            "برای لغو: /cancel"
+        )
+        await state.set_state(ReferralEditStates.waiting_traffic)
+    else:
+        from services.referral import get_referral_settings
+        cfg = await get_referral_settings()
+        d = cfg["custom_days"]
+        prompt = (
+            f"⏱ <b>مدت پاداش را به روز وارد کنید:</b>\n"
+            f"مقدار فعلی: <code>{d} روز</code>\n\n"
+            "مثال: <code>30</code>\n"
+            "برای لغو: /cancel"
+        )
+        await state.set_state(ReferralEditStates.waiting_days)
+
+    await callback.message.answer(prompt, parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("adm_ref_set_inbound:"))
+async def cb_adm_ref_set_inbound(callback: CallbackQuery) -> None:
+    """ذخیره اینباند انتخاب‌شده برای پاداش referral."""
+    if not await _check_admin(callback):
+        return
+    inbound_id = int(callback.data.split(":")[1])
+    from database.crud import set_setting
+    from services.referral import REFERRAL_INBOUND_ID_KEY
+    inbound_remark = str(inbound_id)
+    try:
+        async with _xui_client() as xui:
+            _inbs = await xui.get_inbounds()
+        for _inb in _inbs:
+            if _inb.id == inbound_id:
+                inbound_remark = _inb.remark
+                break
+    except Exception:
+        pass
+    async with AsyncSessionLocal() as session:
+        await set_setting(session, REFERRAL_INBOUND_ID_KEY, str(inbound_id))
+    await callback.answer(f"✅ اینباند «{inbound_remark}» انتخاب شد")
+    await _show_referral_settings(callback)
+
+
+@router.message(ReferralEditStates.waiting_traffic)
+async def msg_referral_traffic_input(message: Message, state: FSMContext) -> None:
+    """دریافت حجم پاداش."""
+    raw = (message.text or "").strip().replace(",", ".")
+    if raw == "/cancel":
+        await state.clear()
+        await message.answer("❌ لغو شد.", reply_markup=get_admin_main_keyboard())
+        return
+    try:
+        traffic = float(raw)
+        if traffic <= 0:
+            raise ValueError()
+    except ValueError:
+        await message.answer("⚠️ لطفاً یک ضدد مثبت وارد کنید.\nمثال: <code>5</code>", parse_mode="HTML")
+        return
+    from database.crud import set_setting
+    from services.referral import REFERRAL_CUSTOM_TRAFFIC_KEY
+    async with AsyncSessionLocal() as session:
+        await set_setting(session, REFERRAL_CUSTOM_TRAFFIC_KEY, str(traffic))
+    await state.clear()
+    await message.answer(
+        f"✅ حجم پاداش referral به <b>{traffic:g} GB</b> تغییر کرد.",
+        parse_mode="HTML",
+        reply_markup=get_admin_main_keyboard(),
+    )
+
+
+@router.message(ReferralEditStates.waiting_days)
+async def msg_referral_days_input(message: Message, state: FSMContext) -> None:
+    """دریافت مدت پاداش."""
+    raw = (message.text or "").strip()
+    if raw == "/cancel":
+        await state.clear()
+        await message.answer("❌ لغو شد.", reply_markup=get_admin_main_keyboard())
+        return
+    if not raw.isdigit() or int(raw) < 1:
+        await message.answer("⚠️ لطفاً یک عدد صحیح مثبت وارد کنید.\nمثال: <code>30</code>", parse_mode="HTML")
+        return
+    days = int(raw)
+    from database.crud import set_setting
+    from services.referral import REFERRAL_CUSTOM_DAYS_KEY
+    async with AsyncSessionLocal() as session:
+        await set_setting(session, REFERRAL_CUSTOM_DAYS_KEY, str(days))
+    await state.clear()
+    await message.answer(
+        f"✅ مدت پاداش referral به <b>{days} روز</b> تغییر کرد.",
+        parse_mode="HTML",
+        reply_markup=get_admin_main_keyboard(),
+    )
+
+
+@router.callback_query(F.data == "adm_ref_choose_plan")
+async def cb_adm_ref_choose_plan(callback: CallbackQuery) -> None:
+    """نمایش لیست پلن‌ها برای انتخاب پاداش."""
+    if not await _check_admin(callback):
+        return
+    await callback.answer()
+    from database.crud import get_all_plans, get_setting
+    from services.referral import REFERRAL_REWARD_PLAN_ID_KEY
+    async with AsyncSessionLocal() as session:
+        plans = await get_all_plans(session)
+        plan_id_raw = await get_setting(session, REFERRAL_REWARD_PLAN_ID_KEY, "0")
+
+    try:
+        current_plan_id = int(plan_id_raw) if plan_id_raw.isdigit() else 0
+    except Exception:
+        current_plan_id = 0
+
+    if not plans:
+        await callback.answer("⚠️ هیچ پلنی تعریف نشده!", show_alert=True)
+        return
+
+    await _safe_edit_admin(
+        callback,
+        "📦 <b>پلن پاداش Referral را انتخاب کنید:</b>\n\n"
+        "این پلن به صورت رایگان به دعوت‌کننده داده می‌شود.",
+        parse_mode="HTML",
+        reply_markup=get_referral_plan_select_keyboard(plans, current_plan_id),
+    )
+
+
+@router.callback_query(F.data.startswith("adm_ref_set_plan:"))
+async def cb_adm_ref_set_plan(callback: CallbackQuery) -> None:
+    """ذخیره پلن انتخاب‌شده برای پاداش referral."""
+    if not await _check_admin(callback):
+        return
+    plan_id = int(callback.data.split(":")[1])
+    from database.crud import set_setting, get_plan
+    from services.referral import REFERRAL_REWARD_PLAN_ID_KEY
+    async with AsyncSessionLocal() as session:
+        plan = await get_plan(session, plan_id)
+        if not plan:
+            await callback.answer("❌ پلن پیدا نشد", show_alert=True)
+            return
+        await set_setting(session, REFERRAL_REWARD_PLAN_ID_KEY, str(plan_id))
+    await callback.answer(f"✅ پلن «{plan.name}» انتخاب شد")
+    await _show_referral_settings(callback)

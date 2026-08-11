@@ -26,6 +26,7 @@ from config import settings
 from database import AsyncSessionLocal
 from database.crud import get_payment_by_order_id, update_payment_status
 from services.subscription import create_new_subscription
+from services.referral import after_purchase_referral_hook
 
 
 def _get_db_path() -> Optional[str]:
@@ -229,6 +230,11 @@ async def _build_manual_subscription(bot: Bot, payload: dict) -> None:
                 username=_username,
             )
             logger.success(f"manual_sub: اشتراک {result.subscription.id} برای user {user_id} ساخته شد")
+            # referral hook برای اشتراک دستی هم
+            try:
+                await after_purchase_referral_hook(user_id=user_id, bot=bot)
+            except Exception as _ref_err:
+                logger.warning(f"referral hook (manual_sub): {_ref_err}")
         except Exception as e:
             logger.error(f"manual_sub: خطا در ساخت اشتراک برای user {user_id}: {e}")
             try:
@@ -303,8 +309,16 @@ async def _sub_toggle(payload: dict) -> None:
     new_enable = (current_status != "active")
     new_status = "active" if new_enable else "disabled"
 
-    async with _xui_client() as xui:
-        await xui.update_client(email=email, enable=new_enable)
+    try:
+        async with _xui_client() as xui:
+            await xui.update_client(email=email, enable=new_enable)
+    except Exception as _xui_err:
+        _err_str = str(_xui_err).lower()
+        if "not found" in _err_str or "record not found" in _err_str:
+            # کلاینت در XUI نیست — فقط DB را آپدیت می‌کنیم
+            logger.warning(f"sub_toggle: کلاینت '{email}' در XUI یافت نشد — فقط DB آپدیت می‌شود")
+        else:
+            raise
 
     from database.crud import update_subscription_status
     async with AsyncSessionLocal() as session:
@@ -319,8 +333,15 @@ async def _sub_reset(payload: dict) -> None:
         return
     email, _ = await _get_sub_email(sub_id)
 
-    async with _xui_client() as xui:
-        await xui._request("POST", f"/clients/resetTraffic/{email}")
+    try:
+        async with _xui_client() as xui:
+            await xui._request("POST", f"/clients/resetTraffic/{email}")
+    except Exception as _xui_err:
+        _err_str = str(_xui_err).lower()
+        if "not found" in _err_str or "record not found" in _err_str:
+            logger.warning(f"sub_reset: کلاینت '{email}' در XUI یافت نشد — فقط DB آپدیت می‌شود")
+        else:
+            raise
 
     from database.crud import update_subscription_traffic
     async with AsyncSessionLocal() as session:
@@ -335,8 +356,16 @@ async def _sub_delete(payload: dict) -> None:
         return
     email, _ = await _get_sub_email(sub_id)
 
-    async with _xui_client() as xui:
-        await xui.delete_client(email)
+    try:
+        async with _xui_client() as xui:
+            await xui.delete_client(email)
+    except Exception as _xui_err:
+        _err_str = str(_xui_err).lower()
+        if "not found" in _err_str or "record not found" in _err_str or "client" in _err_str:
+            # کلاینت در XUI وجود ندارد — در DB به deleted تغییر می‌دهیم
+            logger.warning(f"sub_delete: کلاینت '{email}' در XUI یافت نشد — فقط DB آپدیت می‌شود")
+        else:
+            raise
 
     from database.crud import update_subscription_status
     async with AsyncSessionLocal() as session:
@@ -549,6 +578,11 @@ async def _build_subscription(bot: Bot, order_id: str, telegram_id: int) -> None
             )
             await update_payment_status(session, payment.id, "confirmed", result.subscription.id)
             logger.success(f"اشتراک {result.subscription.id} برای {order_id} ساخته شد")
+            # referral hook — بعد از session بسته شد
+            try:
+                await after_purchase_referral_hook(user_id=user.id, bot=bot)
+            except Exception as _ref_err:
+                logger.warning(f"referral hook (_build_subscription): {_ref_err}")
         except Exception as e:
             logger.error(f"خطا در ساخت اشتراک {order_id}: {e}")
             if telegram_id:

@@ -88,6 +88,7 @@ def get_admin_main_keyboard() -> InlineKeyboardMarkup:
     # ── گروه ۶: امنیت ────────────────────────────────
     b.button(text="🔐  تنظیمات امنیتی", callback_data="adm_security")
     b.button(text="🎁  اشتراک تست",     callback_data="adm_test_sub_settings")
+    b.button(text="🔗  تنظیمات دعوت",   callback_data="adm_ref_settings")
 
     # ── گروه ۷: ظاهر ربات ────────────────────────────
     b.button(text="🎨  تم ربات",         callback_data="adm_theme")
@@ -640,4 +641,79 @@ def get_admin_lock_confirm_keyboard(locking: bool) -> InlineKeyboardMarkup:
         b.button(text="🔓 بله، باز کن",   callback_data="adm_mgr_lock_do:0")
     b.button(text="❌ انصراف",            callback_data="adm_managers")
     b.adjust(2)
+    return b.as_markup()
+
+
+# ──────────────────────────────────────────────
+# تنظیمات Referral
+# ──────────────────────────────────────────────
+
+def get_referral_settings_keyboard(
+    reward_type: str,
+    trigger: str,
+    reward_days: int,
+    reward_plan_name: str,
+    custom_traffic: float = 5.0,
+    custom_days: int = 30,
+    inbound_name: str = "",
+) -> "InlineKeyboardMarkup":
+    """منوی اصلی تنظیمات referral."""
+    b = InlineKeyboardBuilder()
+
+    # نوع ٽاداش
+    custom_tick = "✅" if reward_type in ("custom", "days") else "⬜"
+    plan_tick   = "✅" if reward_type == "plan" else "⬜"
+    b.button(text=f"{custom_tick} کانفیگ دلخواه", callback_data="adm_ref_type:custom")
+    b.button(text=f"{plan_tick} پلن رایگان",       callback_data="adm_ref_type:plan")
+
+    # ویرایش custom
+    if reward_type != "plan":
+        b.button(text=f"📦 حجم: {custom_traffic:g} GB",  callback_data="adm_ref_edit:traffic")
+        b.button(text=f"⏱ مدت: {custom_days} روز",       callback_data="adm_ref_edit:days")
+        inb_label = inbound_name or "انتخاب نشده"
+        b.button(text=f"🔌 اینباند: {inb_label}",        callback_data="adm_ref_edit:inbound")
+    else:
+        plan_label = reward_plan_name or "انتخاب نشده"
+        b.button(text=f"📦 پلن: {plan_label}", callback_data="adm_ref_choose_plan")
+
+    # trigger
+    trigger_labels = {
+        "on_register":        "📋 هنگام ثبت‌نام",
+        "on_first_purchase":  "🛒 اولین خرید",
+        "on_every_purchase":  "🔄 هر خرید",
+    }
+    for key, label in trigger_labels.items():
+        tick = "✅" if trigger == key else "⬜"
+        b.button(text=f"{tick} {label}", callback_data=f"adm_ref_trigger:{key}")
+
+    b.button(text=f"{_t().star2}  بازگشت", callback_data="adm_back")
+    if reward_type != "plan":
+        b.adjust(2, 1, 1, 1, 1, 1, 1, 1)
+    else:
+        b.adjust(2, 1, 1, 1, 1, 1)
+    return b.as_markup()
+
+
+def get_referral_inbound_keyboard(inbounds: list, current_id: int) -> "InlineKeyboardMarkup":
+    """لیست اینباندها برای انتخاب اینhباند پاداش referral."""
+    b = InlineKeyboardBuilder()
+    for inb in inbounds:
+        tick = "✅ " if inb.id == current_id else "⬜ "
+        b.button(
+            text=f"{tick}{inb.remark} ({inb.protocol.upper()}:{inb.port})",
+            callback_data=f"adm_ref_set_inbound:{inb.id}",
+        )
+    b.button(text=f"{_t().star2}  بازگشت", callback_data="adm_ref_settings")
+    b.adjust(1)
+    return b.as_markup()
+
+def get_referral_plan_select_keyboard(plans: list, current_plan_id: int) -> "InlineKeyboardMarkup":
+    """لیست پلن‌ها برای انتخاب پاداش referral."""
+    b = InlineKeyboardBuilder()
+    for plan in plans:
+        tick = "✅ " if plan.id == current_plan_id else "⬜ "
+        b.button(text=f"{tick}{plan.name} — {plan.traffic_gb}GB/{plan.duration_days}روز",
+                 callback_data=f"adm_ref_set_plan:{plan.id}")
+    b.button(text=f"{_t().star2}  بازگشت", callback_data="adm_ref_settings")
+    b.adjust(1)
     return b.as_markup()
