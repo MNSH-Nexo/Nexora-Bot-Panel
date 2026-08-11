@@ -1933,6 +1933,120 @@ else
   _ok "Bot started (SQLite)"
 fi
 
+# ── Docker network connectivity check ────────────────────────
+# Some VPS providers (Vultr, certain Hetzner configs, etc.) have:
+#   1. UFW DEFAULT_FORWARD_POLICY=DROP  (blocks Docker bridge routing)
+#   2. nftables egress_guard rules      (blocks outbound from Docker subnets)
+#   3. Broken bridge carrier detection  (NO-CARRIER on br-* interfaces)
+# We test if the bot container can reach Telegram.
+# If not, we switch docker-compose.yml to network_mode: host which bypasses
+# all bridge/NAT issues by sharing the host's network stack directly.
+_info "Testing Docker network connectivity..."
+_net_ok=false
+for _attempt in 1 2 3; do
+  sleep 5
+  _result=$(docker exec nexora_bot python3 -c "
+import socket, sys
+try:
+    s = socket.create_connection(('149.154.167.220', 443), timeout=8)
+    s.close()
+    print('ok')
+except Exception as e:
+    print('fail:' + str(e))
+" 2>/dev/null)
+  if [[ "$_result" == "ok" ]]; then
+    _net_ok=true
+    break
+  fi
+  _warn "Attempt ${_attempt}/3: container cannot reach Telegram (${_result})"
+done
+
+if [[ "$_net_ok" == "false" ]]; then
+  _warn "Docker bridge networking is broken on this server."
+  _info "Applying fix: switching to host network mode..."
+
+  # فیکس ۱: UFW + ip_forward (شاید قبلاً اعمال نشده بود)
+  sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+  if command -v ufw &>/dev/null; then
+    sed -i 's/DEFAULT_FORWARD_POLICY=.*/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw 2>/dev/null || true
+    ufw reload >/dev/null 2>&1 || true
+  fi
+
+  # فیکس ۲: nftables egress_guard — اضافه کردن exception برای subnet های Docker
+  if command -v nft &>/dev/null && nft list table inet egress_guard &>/dev/null 2>&1; then
+    _info "Detected nftables egress_guard — adding Docker subnet exception..."
+    for _subnet in 172.16.0.0/12 192.168.0.0/16; do
+      nft insert rule inet egress_guard output position 0 ip saddr "$_subnet" accept 2>/dev/null || true
+    done
+  fi
+
+  # فیکس ۳: تست مجدد بعد از nftables fix
+  sleep 3
+  _result2=$(docker exec nexora_bot python3 -c "
+import socket
+try:
+    s=socket.create_connection(('149.154.167.220',443),8); s.close(); print('ok')
+except Exception as e: print('fail')
+" 2>/dev/null)
+
+  if [[ "$_result2" == "ok" ]]; then
+    _ok "Network fixed via nftables exception"
+  else
+    # فیکس ۴: fallback به host network mode
+    _info "Bridge networking unfixable — switching to network_mode: host..."
+    cd "$BOT_DIR"
+    # جایگزینی در docker-compose.yml
+    python3 - << 'PYEOF'
+import re, sys
+path = 'docker-compose.yml'
+with open(path) as f:
+    content = f.read()
+
+# حذف network_mode: host اگر قبلاً بود
+content = re.sub(r'\s*network_mode: host[^\n]*\n', '\n', content)
+
+# جایگزینی "    networks:" سرویس bot با network_mode: host
+# فقط داخل سرویس bot (قبل از سرویس db)
+bot_section = re.split(r'\n  db:', content, maxsplit=1)
+bot_part = re.sub(
+    r'(\n    networks:\n      - nexora_net)',
+    '\n    network_mode: "host"  # auto-applied: bridge routing broken on this VPS',
+    bot_section[0], count=1
+)
+# comment out networks line inside bot service
+result = bot_part
+if len(bot_section) > 1:
+    result += '\n  db:' + bot_section[1]
+
+with open(path, 'w') as f:
+    f.write(result)
+print('docker-compose.yml updated to host network mode')
+PYEOF
+
+    docker compose down >/dev/null 2>&1
+    sleep 2
+    docker compose up -d bot >/dev/null 2>&1
+    sleep 10
+
+    _final=$(docker exec nexora_bot python3 -c "
+import socket
+try:
+    s=socket.create_connection(('149.154.167.220',443),8); s.close(); print('ok')
+except: print('fail')
+" 2>/dev/null)
+
+    if [[ "$_final" == "ok" ]]; then
+      _ok "Network fixed: running in host network mode"
+    else
+      _warn "Could not fix Docker networking automatically."
+      _warn "The bot may not respond to Telegram messages."
+      _warn "Manual fix: run 'nexo-bot' → option to switch network mode"
+    fi
+  fi
+else
+  _ok "Docker network: OK (Telegram reachable)"
+fi
+
 # ──────────────────────────────────────────────────────────────
 #  STEP 7  nexo-bot CLI
 # ──────────────────────────────────────────────────────────────
