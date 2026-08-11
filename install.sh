@@ -1491,6 +1491,15 @@ _setup_nginx_ssl() {
   local _domain="$1" _port="$2"
   local _nginx_conf="/etc/nginx/conf.d/nexora-panel.conf"
 
+  # needrestart را موقتاً غیرفعال کن تا پس از نصب nginx اسکریپت interrupt نشود
+  if [[ -f /etc/needrestart/needrestart.conf ]]; then
+    sed -i "s/^#\?\s*\$nrconf{restart}.*/\$nrconf{restart} = 'a';/" \
+      /etc/needrestart/needrestart.conf 2>/dev/null || true
+  fi
+  # متغیر محیطی هم برای جلوگیری از prompt
+  export NEEDRESTART_MODE=a
+  export DEBIAN_FRONTEND=noninteractive
+
   case "$PKG_MANAGER" in
     apt) _retry 3 5 apt-get install -y -qq nginx certbot python3-certbot-nginx 2>&1 | tail -2 ;;
     dnf) _retry 3 5 dnf install -y nginx certbot python3-certbot-nginx 2>&1 | tail -2 ;;
@@ -1531,8 +1540,17 @@ NGINXEOF
   rm -f /tmp/certbot-*.lock /tmp/.certbot.lock /var/lib/letsencrypt/.certbot.lock 2>/dev/null || true
   pkill -f "certbot" 2>/dev/null || true; sleep 1
 
-  if certbot certonly --webroot -w /var/www/html -d "$_domain" \
-      --non-interactive --agree-tos --register-unsafely-without-email 2>&1 | tail -5; then
+  # certbot با timeout=120s اجرا می‌شود تا اسکریپت هنگ نکند
+  # set +e تا exit code 1 از certbot باعث خروج کل اسکریپت نشود
+  local _certbot_ok=false
+  set +e
+  timeout 120 certbot certonly --webroot -w /var/www/html -d "$_domain" \
+      --non-interactive --agree-tos --register-unsafely-without-email 2>&1 | tail -5
+  local _certbot_exit=${PIPESTATUS[0]}
+  set -e
+  [[ $_certbot_exit -eq 0 ]] && _certbot_ok=true
+
+  if [[ "$_certbot_ok" == "true" ]]; then
 
     local _cert_dir="/etc/letsencrypt/live/${_domain}"
     for _old in /etc/nginx/conf.d/*.conf /etc/nginx/sites-enabled/*; do
@@ -1592,6 +1610,15 @@ echo -e "  This script installs Nexora VPN Bot on your server."
 echo -e "  ${DIM}Prerequisites: 3X-UI panel must already be running.${RESET}"
 echo ""
 read -rp "  Press Enter to start or Ctrl+C to cancel..." _
+
+# ── needrestart را از همان ابتدا به حالت auto بگذار ──────────
+# این از interrupt شدن اسکریپت پس از نصب nodejs/nginx جلوگیری می‌کند
+export NEEDRESTART_MODE=a
+export DEBIAN_FRONTEND=noninteractive
+if [[ -f /etc/needrestart/needrestart.conf ]]; then
+  sed -i "s/^#\?\s*\$nrconf{restart}.*/\$nrconf{restart} = 'a';/" \
+    /etc/needrestart/needrestart.conf 2>/dev/null || true
+fi
 
 # ──────────────────────────────────────────────────────────────
 #  STEP 1  Network & Docker
