@@ -1995,28 +1995,28 @@ echo '    ╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝
 echo -e "${RESET}"
 echo -e "${GREEN}${BOLD}"
 echo '  ╔══════════════════════════════════════════════════════════╗'
-echo '  ║       ✦  نصب با موفقیت کامل شد · Installation Done  ✦  ║'
+echo '  ║            ✦  Installation Completed Successfully  ✦    ║'
 echo '  ╚══════════════════════════════════════════════════════════╝'
 echo -e "${RESET}"
-echo -e "  ${DIM}  ممنون که از Nexora-Bot استفاده می‌کنید  🙏${RESET}"
+echo -e "  ${DIM}  Thank you for using Nexora-Bot  🙏${RESET}"
 echo ''
 
 # ── Bot Info Box ─────────────────────────────────────────────
-echo -e "${BOLD}${YELLOW}  ▸ ربات تلگرام${RESET}"
+echo -e "${BOLD}${YELLOW}  ▸ Telegram Bot${RESET}"
 echo -e "  ${DIM}┌──────────────────────────────────────────────────────┐${RESET}"
-echo -e "  │  ${GREEN}✔${RESET}  مسیر نصب  :  ${CYAN}$INSTALL_DIR${RESET}"
-echo -e "  │  ${GREEN}✔${RESET}  دستور CLI  :  ${CYAN}nexo-bot${RESET}"
+echo -e "  │  ${GREEN}✔${RESET}  Install dir  :  ${CYAN}$INSTALL_DIR${RESET}"
+echo -e "  │  ${GREEN}✔${RESET}  CLI command  :  ${CYAN}nexo-bot${RESET}"
 echo -e "  ${DIM}└──────────────────────────────────────────────────────┘${RESET}"
 echo ''
 
 # ── Web Panel Box ─────────────────────────────────────────────
 if [[ "$WEB_PANEL_INSTALLED" == "true" ]]; then
-  echo -e "${BOLD}${YELLOW}  ▸ وب پنل مدیریت${RESET}"
+  echo -e "${BOLD}${YELLOW}  ▸ Web Admin Panel${RESET}"
   echo -e "  ${DIM}┌──────────────────────────────────────────────────────┐${RESET}"
-  echo -e "  │  ${GREEN}✔${RESET}  آدرس پنل   :  ${CYAN}http://${_srv_ip}:${WEB_PANEL_PORT_FINAL}${WEB_PANEL_PATH_FINAL}${RESET}"
-  echo -e "  │  ${GREEN}✔${RESET}  نام کاربری :  ${YELLOW}${_wp_user:-admin}${RESET}"
-  echo -e "  │  ${GREEN}✔${RESET}  رمز عبور   :  ${YELLOW}${_wpass:-<see .env>}${RESET}"
-  echo -e "  │  ${YELLOW}⚠${RESET}  ${DIM}مسیر پنل (secret path) را مخفی نگه دارید!${RESET}"
+  echo -e "  │  ${GREEN}✔${RESET}  Panel URL   :  ${CYAN}http://${_srv_ip}:${WEB_PANEL_PORT_FINAL}${WEB_PANEL_PATH_FINAL}${RESET}"
+  echo -e "  │  ${GREEN}✔${RESET}  Username    :  ${YELLOW}${_wp_user:-admin}${RESET}"
+  echo -e "  │  ${GREEN}✔${RESET}  Password    :  ${YELLOW}${_wpass:-<see .env>}${RESET}"
+  echo -e "  │  ${YELLOW}⚠${RESET}  ${DIM}Keep your secret path private!${RESET}"
   if [[ -d /etc/letsencrypt/live ]]; then
     _dom=$(ls /etc/letsencrypt/live/ 2>/dev/null | grep -v "^README$" | head -1 || true)
     [[ -n "$_dom" ]] && echo -e "  │  ${GREEN}✔${RESET}  HTTPS       :  ${CYAN}https://${_dom}${WEB_PANEL_PATH_FINAL}${RESET}"
@@ -2026,21 +2026,21 @@ if [[ "$WEB_PANEL_INSTALLED" == "true" ]]; then
 fi
 
 # ── Quick Start Box ───────────────────────────────────────────
-echo -e "${BOLD}${YELLOW}  ▸ شروع سریع${RESET}"
+echo -e "${BOLD}${YELLOW}  ▸ Quick Start${RESET}"
 echo -e "  ${DIM}┌──────────────────────────────────────────────────────┐${RESET}"
-echo -e "  │  ①  تلگرام را باز کنید و به ربات پیام دهید"
-echo -e "  │  ②  دستور ادمین را بزنید تا وارد پنل شوید"
-echo -e "  │  ③  با دستور ${CYAN}nexo-bot${RESET} هر زمان ربات را مدیریت کنید"
+echo -e "  │  ①  Open Telegram and send a message to your bot"
+echo -e "  │  ②  Use the admin command to access the admin panel"
+echo -e "  │  ③  Run ${CYAN}nexo-bot${RESET} anytime to manage your bot"
 echo -e "  ${DIM}└──────────────────────────────────────────────────────┘${RESET}"
 echo ''
 
 # ── Useful Commands Box ───────────────────────────────────────
-echo -e "${BOLD}${YELLOW}  ▸ دستورهای مفید${RESET}"
+echo -e "${BOLD}${YELLOW}  ▸ Useful Commands${RESET}"
 echo -e "  ${DIM}┌──────────────────────────────────────────────────────┐${RESET}"
-echo -e "  │  لاگ ربات     :  ${CYAN}docker compose -f $INSTALL_DIR/docker-compose.yml logs -f bot${RESET}"
-echo -e "  │  لاگ پنل      :  ${CYAN}journalctl -u nexora-panel -f${RESET}"
-echo -e "  │  ریستارت ربات :  ${CYAN}docker compose -f $INSTALL_DIR/docker-compose.yml restart bot${RESET}"
-echo -e "  │  مدیریت کلی   :  ${CYAN}nexo-bot${RESET}"
+echo -e "  │  Bot logs      :  ${CYAN}docker compose -f $INSTALL_DIR/docker-compose.yml logs -f bot${RESET}"
+echo -e "  │  Panel logs    :  ${CYAN}journalctl -u nexora-panel -f${RESET}"
+echo -e "  │  Restart bot   :  ${CYAN}docker compose -f $INSTALL_DIR/docker-compose.yml restart bot${RESET}"
+echo -e "  │  Manage all    :  ${CYAN}nexo-bot${RESET}"
 echo -e "  ${DIM}└──────────────────────────────────────────────────────┘${RESET}"
 echo ''
 
