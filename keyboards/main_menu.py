@@ -38,6 +38,7 @@ BTN_PROFILE     = "پروفایل"
 BTN_UUID        = "وارد کردن UUID"
 BTN_REFERRAL    = "دعوت دوستان"
 BTN_SUPPORT     = "پشتیبانی"
+BTN_GUIDE       = "آموزش و نکات"
 BTN_ADMIN       = "پنل مدیریت"
 
 
@@ -61,8 +62,9 @@ def _kb(t) -> list[list[KeyboardButton]]:
         [_btn(f"{s}  {BTN_SUPPORT}"),
          _btn(f"{s2}  {BTN_REFERRAL}")],
 
-        # ردیف ۴: UUID (بی‌رنگ)
-        [_btn(f"{s}  {BTN_UUID}")],
+        # ردیف ۴: آموزش و نکات + UUID
+        [_btn(f"{s}  {BTN_GUIDE}"),
+         _btn(f"{s2}  {BTN_UUID}")],
     ]
 
 

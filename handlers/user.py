@@ -18,7 +18,7 @@ from loguru import logger
 
 from config import settings
 from database import AsyncSessionLocal, get_or_create_user, get_user_by_telegram_id
-from keyboards.main_menu import get_main_menu, get_main_menu_async
+from keyboards.main_menu import get_main_menu, get_main_menu_async, BTN_GUIDE
 from services.banner import send_with_banner
 from services.welcome import (
     check_user_joined,
@@ -837,3 +837,24 @@ async def cb_back_main(callback: CallbackQuery) -> None:
         reply_markup=await get_main_menu_async(is_admin=is_admin),
     )
     await callback.message.delete()  # type: ignore[union-attr]
+
+
+# ──────────────────────────────────────────────
+# Handler: آموزش و نکات
+# ──────────────────────────────────────────────
+
+
+
+@router.message(F.text.contains(BTN_GUIDE))
+async def menu_guide(message: Message) -> None:
+    """Show guide text set by admin."""
+    from database.crud import get_setting
+    async with AsyncSessionLocal() as session:
+        guide = await get_setting(session, "guide_text", "")
+
+    if not guide or not guide.strip():
+        no_text = "❓ آموزشی تنظیم نشده. بعداً اضافه خواهد شد."
+        await message.answer(no_text, parse_mode="Markdown")
+        return
+
+    await message.answer(guide, parse_mode="Markdown")
