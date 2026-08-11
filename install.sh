@@ -1995,52 +1995,94 @@ except Exception as e: print('fail')
     # فیکس ۴: fallback به host network mode
     _info "Bridge networking unfixable — switching to network_mode: host..."
     cd "$BOT_DIR"
-    # جایگزینی در docker-compose.yml
-    python3 - << 'PYEOF'
-import re, sys
-path = 'docker-compose.yml'
-with open(path) as f:
-    content = f.read()
 
-# حذف network_mode: host اگر قبلاً بود
-content = re.sub(r'\s*network_mode: host[^\n]*\n', '\n', content)
+    # روش مطمئن: با sed خط به خط، بدون regex پیچیده
+    # ۱. اضافه کردن network_mode: host بعد از خط "image:" در سرویس bot
+    # ۲. comment کردن خطوط networks در سرویس bot
 
-# جایگزینی "    networks:" سرویس bot با network_mode: host
-# فقط داخل سرویس bot (قبل از سرویس db)
-bot_section = re.split(r'\n  db:', content, maxsplit=1)
-bot_part = re.sub(
-    r'(\n    networks:\n      - nexora_net)',
-    '\n    network_mode: "host"  # auto-applied: bridge routing broken on this VPS',
-    bot_section[0], count=1
-)
-# comment out networks line inside bot service
-result = bot_part
-if len(bot_section) > 1:
-    result += '\n  db:' + bot_section[1]
-
-with open(path, 'w') as f:
-    f.write(result)
-print('docker-compose.yml updated to host network mode')
-PYEOF
-
-    docker compose down >/dev/null 2>&1
+    # ابتدا container و network را پاک کن
+    docker compose down --remove-orphans >/dev/null 2>&1 || true
     sleep 2
-    docker compose up -d bot >/dev/null 2>&1
-    sleep 10
 
-    _final=$(docker exec nexora_bot python3 -c "
+    # بک‌آپ
+    cp docker-compose.yml docker-compose.yml.bak
+
+    # تغییر با awk — روش قابل اطمینان برای ساختار YAML
+    awk '
+    /^  bot:/ { in_bot=1 }
+    /^  [a-z]/ && !/^  bot:/ { in_bot=0 }
+    in_bot && /^    networks:/ {
+      if (!host_added) {
+        print "    network_mode: \"host\"  # auto-applied: bridge routing broken on this VPS"
+        host_added=1
+      }
+      print "#" $0
+      next
+    }
+    in_bot && /^      - nexora_net/ { print "#" $0; next }
+    { print }
+    ' docker-compose.yml.bak > docker-compose.yml
+
+    # بررسی صحت فایل جدید
+    if ! grep -q 'network_mode.*host' docker-compose.yml; then
+      _warn "awk patch failed — trying python3 fallback..."
+      python3 - << 'PYEOF'
+import re
+path = 'docker-compose.yml'
+bak  = 'docker-compose.yml.bak'
+with open(bak) as f:
+    lines = f.readlines()
+
+out = []
+in_bot = False
+host_added = False
+for i, line in enumerate(lines):
+    stripped = line.lstrip()
+    indent   = len(line) - len(stripped)
+    # detect service sections (2-space indent + name:)
+    if re.match(r'^  [a-zA-Z]', line) and line.rstrip().endswith(':'):
+        in_bot = line.strip().rstrip(':') == 'bot'
+        host_added = False
+    if in_bot and not host_added and re.match(r'^    networks:', line):
+        out.append('    network_mode: "host"  # auto-applied: bridge routing broken on this VPS\n')
+        host_added = True
+        out.append('#' + line)
+        continue
+    if in_bot and re.match(r'^      - nexora_net', line):
+        out.append('#' + line)
+        continue
+    out.append(line)
+with open(path, 'w') as f:
+    f.writelines(out)
+print('docker-compose.yml patched via python3')
+PYEOF
+    fi
+
+    _info "Starting bot with host network mode..."
+    if [[ "$USE_POSTGRES" == "true" ]]; then
+      docker compose --profile postgres up -d 2>&1 | tail -3
+    else
+      docker compose up -d bot 2>&1 | tail -3
+    fi
+
+    # صبر بیشتر — bot startup time
+    for _w in 1 2 3 4; do
+      sleep 5
+      _final=$(docker exec nexora_bot python3 -c "
 import socket
 try:
     s=socket.create_connection(('149.154.167.220',443),8); s.close(); print('ok')
-except: print('fail')
+except Exception as e: print('fail')
 " 2>/dev/null)
+      [[ "$_final" == "ok" ]] && break
+    done
 
     if [[ "$_final" == "ok" ]]; then
       _ok "Network fixed: running in host network mode"
     else
       _warn "Could not fix Docker networking automatically."
       _warn "The bot may not respond to Telegram messages."
-      _warn "Manual fix: run 'nexo-bot' → option to switch network mode"
+      _warn "To fix manually: nexo-bot → Troubleshoot → Switch to host network"
     fi
   fi
 else
