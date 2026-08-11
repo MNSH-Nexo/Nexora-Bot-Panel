@@ -70,6 +70,61 @@ _retry() {
   done
 }
 
+# ── APT mirror auto-fix ──────────────────────────────────────
+# archive.ubuntu.com is unreachable from many regions (e.g. Asia/HK).
+# This function tests reachability and switches to a fast nearby mirror.
+_APT_MIRROR_FIXED=false
+_fix_apt_mirror() {
+  [[ "$PKG_MANAGER" != "apt" ]] && return 0
+  [[ "$_APT_MIRROR_FIXED" == "true" ]] && return 0
+
+  # اگر archive.ubuntu.com قابل دسترس است، نیازی به تغییر نیست
+  if curl -fsSL --max-time 5 http://archive.ubuntu.com/ubuntu/dists/stable/Release \
+       -o /dev/null 2>/dev/null; then
+    _APT_MIRROR_FIXED=true; return 0
+  fi
+
+  # پیدا کردن سریع‌ترین mirror
+  _info "archive.ubuntu.com unreachable — finding fastest mirror..."
+  local best_mirror="" best_time=99
+  local candidates=(
+    "mirror.xtom.com.hk/ubuntu"
+    "mirror.xtom.de/ubuntu"
+    "de.archive.ubuntu.com/ubuntu"
+    "nl.archive.ubuntu.com/ubuntu"
+    "mirrors.aliyun.com/ubuntu"
+    "mirror.leaseweb.com/ubuntu"
+  )
+  for m in "${candidates[@]}"; do
+    local t
+    t=$(curl -fsSL --max-time 5 "http://${m}/dists/noble/InRelease" \
+         -o /dev/null -w '%{time_total}' 2>/dev/null || echo "99")
+    t="${t%%.*}"   # فقط بخش صحیح
+    if [[ -n "$t" ]] && (( t < best_time )); then
+      best_time=$t; best_mirror="$m"
+    fi
+  done
+
+  if [[ -z "$best_mirror" || "$best_mirror" == "" ]]; then
+    _warn "No fast mirror found — continuing with default (may be slow)"
+    _APT_MIRROR_FIXED=true; return 0
+  fi
+
+  _info "Switching apt mirror to: $best_mirror (~${best_time}s)"
+  local src_file=""
+  for f in /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list; do
+    [[ -f "$f" ]] && src_file="$f" && break
+  done
+
+  if [[ -n "$src_file" ]]; then
+    cp "$src_file" "${src_file}.bak"
+    sed -i "s|http://archive.ubuntu.com/ubuntu|http://${best_mirror}|g" "$src_file"
+    sed -i "s|http://security.ubuntu.com/ubuntu|http://${best_mirror}|g" "$src_file"
+    _ok "APT mirror updated → $best_mirror"
+  fi
+  _APT_MIRROR_FIXED=true
+}
+
 # ── DNS helpers ───────────────────────────────────────────────
 _DNS_FIXED=false
 _fix_dns() {
@@ -95,6 +150,7 @@ _ensure_dns() {
 #  Docker helpers
 # ══════════════════════════════════════════════════════════════
 _install_docker_apt() {
+  _fix_apt_mirror
   _ensure_dns "download.docker.com"
   _info "Waiting for apt lock..."
   local w=0
@@ -318,11 +374,13 @@ _install_nodejs() {
   else
     _info "Installing Node.js v22..."
   fi
+  _fix_apt_mirror
   _ensure_dns "deb.nodesource.com"
   case "$PKG_MANAGER" in
     apt)
-      _retry 3 5  bash -c "curl -fsSL https://deb.nodesource.com/setup_22.x | bash - >/dev/null 2>&1"
-      _retry 3 10 apt-get install -y -qq nodejs
+      # DEBIAN_FRONTEND=noninteractive باعث سریع‌تر شدن setup_22.x می‌شود
+      _retry 3 5  bash -c "DEBIAN_FRONTEND=noninteractive curl -fsSL https://deb.nodesource.com/setup_22.x | DEBIAN_FRONTEND=noninteractive bash - >/dev/null 2>&1"
+      _retry 3 10 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs
       ;;
     dnf)
       _retry 3 5  bash -c "curl -fsSL https://rpm.nodesource.com/setup_22.x | bash - >/dev/null 2>&1"
