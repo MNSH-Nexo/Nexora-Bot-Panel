@@ -1684,6 +1684,30 @@ if ! docker info &>/dev/null 2>&1; then
 fi
 _ok "Docker daemon: running"
 
+# ── UFW / Docker routing fix ──────────────────────────────────
+# On many VPS providers UFW ships with DEFAULT_FORWARD_POLICY=DROP which
+# silently blocks all traffic from Docker containers to the internet.
+# Fix it once here so the bot can reach api.telegram.org after deploy.
+_fix_ufw_docker_routing() {
+  # فعال کردن kernel ip_forward
+  sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+  grep -q 'net.ipv4.ip_forward=1' /etc/sysctl.conf 2>/dev/null \
+    || echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
+
+  if command -v ufw &>/dev/null; then
+    local _ufw_def=/etc/default/ufw
+    if [[ -f "$_ufw_def" ]]; then
+      local _cur; _cur=$(grep '^DEFAULT_FORWARD_POLICY' "$_ufw_def" | cut -d= -f2 | tr -d '"')
+      if [[ "$_cur" != "ACCEPT" ]]; then
+        sed -i 's/DEFAULT_FORWARD_POLICY=.*/DEFAULT_FORWARD_POLICY="ACCEPT"/' "$_ufw_def"
+        ufw reload >/dev/null 2>&1 || true
+        _ok "UFW forward policy: DROP → ACCEPT (required for Docker)"
+      fi
+    fi
+  fi
+}
+_fix_ufw_docker_routing
+
 # ──────────────────────────────────────────────────────────────
 #  STEP 2  Install directory
 # ──────────────────────────────────────────────────────────────
