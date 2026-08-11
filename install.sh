@@ -2008,6 +2008,10 @@ except Exception as e: print('fail')
     cp docker-compose.yml docker-compose.yml.bak
 
     # تغییر با awk — روش قابل اطمینان برای ساختار YAML
+    # در host network mode باید:
+    #   1. network_mode: "host" اضافه شود
+    #   2. networks: و - nexora_net comment شوند
+    #   3. sysctls: و net.ipv6.* comment شوند (در host ns مجاز نیستند)
     awk '
     /^  bot:/ { in_bot=1 }
     /^  [a-z]/ && !/^  bot:/ { in_bot=0 }
@@ -2016,10 +2020,11 @@ except Exception as e: print('fail')
         print "    network_mode: \"host\"  # auto-applied: bridge routing broken on this VPS"
         host_added=1
       }
-      print "#" $0
-      next
+      print "#" $0; next
     }
     in_bot && /^      - nexora_net/ { print "#" $0; next }
+    in_bot && /^    sysctls:/ { print "#" $0; next }
+    in_bot && /^      net\./ { print "#" $0; next }
     { print }
     ' docker-compose.yml.bak > docker-compose.yml
 
@@ -2036,10 +2041,8 @@ with open(bak) as f:
 out = []
 in_bot = False
 host_added = False
-for i, line in enumerate(lines):
-    stripped = line.lstrip()
-    indent   = len(line) - len(stripped)
-    # detect service sections (2-space indent + name:)
+for line in lines:
+    # detect top-level service sections (2-space indent)
     if re.match(r'^  [a-zA-Z]', line) and line.rstrip().endswith(':'):
         in_bot = line.strip().rstrip(':') == 'bot'
         host_added = False
@@ -2048,7 +2051,8 @@ for i, line in enumerate(lines):
         host_added = True
         out.append('#' + line)
         continue
-    if in_bot and re.match(r'^      - nexora_net', line):
+    # comment out: networks list item, sysctls block, net.* sysctl values
+    if in_bot and re.match(r'^      - nexora_net|^    sysctls:|^      net\.', line):
         out.append('#' + line)
         continue
     out.append(line)
