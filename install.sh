@@ -378,9 +378,59 @@ _install_nodejs() {
   _ensure_dns "deb.nodesource.com"
   case "$PKG_MANAGER" in
     apt)
-      # DEBIAN_FRONTEND=noninteractive باعث سریع‌تر شدن setup_22.x می‌شود
-      _retry 3 5  bash -c "DEBIAN_FRONTEND=noninteractive curl -fsSL https://deb.nodesource.com/setup_22.x | DEBIAN_FRONTEND=noninteractive bash - >/dev/null 2>&1"
-      _retry 3 10 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs
+      export DEBIAN_FRONTEND=noninteractive
+      # روش ۱: nodesource setup script
+      _info "Method 1: nodesource setup_22.x..."
+      if curl -fsSL --max-time 30 https://deb.nodesource.com/setup_22.x -o /tmp/_ns22.sh 2>/dev/null \
+         && bash /tmp/_ns22.sh >/dev/null 2>&1; then
+        if apt-get install -y -qq nodejs 2>/dev/null && command -v node &>/dev/null; then
+          _ok "Node.js (nodesource): $(node --version)"; return 0
+        fi
+      fi
+      _warn "nodesource failed — trying fallback methods..."
+
+      # روش ۲: نصب مستقیم از NodeSource با apt-key
+      _info "Method 2: direct NodeSource apt repo..."
+      if curl -fsSL --max-time 15 https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+           | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg 2>/dev/null; then
+        echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
+          > /etc/apt/sources.list.d/nodesource.list
+        apt-get update -qq 2>/dev/null
+        if apt-get install -y -qq nodejs 2>/dev/null && command -v node &>/dev/null; then
+          _ok "Node.js (apt-key): $(node --version)"; return 0
+        fi
+      fi
+      _warn "apt-key method failed — trying NVM fallback..."
+
+      # روش ۳: NVM (بدون نیاز به apt)
+      _info "Method 3: NVM install..."
+      export NVM_DIR="/root/.nvm"
+      if curl -fsSL --max-time 30 https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh \
+           | bash >/dev/null 2>&1; then
+        [[ -f "$NVM_DIR/nvm.sh" ]] && source "$NVM_DIR/nvm.sh"
+        if nvm install 22 >/dev/null 2>&1 && nvm use 22 >/dev/null 2>&1; then
+          nvm alias default 22 >/dev/null 2>&1 || true
+          # symlink برای در دسترس بودن node به عنوان global
+          ln -sf "$(which node)" /usr/local/bin/node 2>/dev/null || true
+          ln -sf "$(which npm)"  /usr/local/bin/npm  2>/dev/null || true
+          _ok "Node.js (NVM): $(node --version)"; return 0
+        fi
+      fi
+      _warn "NVM failed — trying binary download..."
+
+      # روش ۴: دانلود مستقیم binary
+      _info "Method 4: direct binary download..."
+      local arch; arch=$(uname -m)
+      [[ "$arch" == "x86_64" ]] && arch="x64"
+      [[ "$arch" == "aarch64" ]] && arch="arm64"
+      local node_url="https://nodejs.org/dist/v22.11.0/node-v22.11.0-linux-${arch}.tar.xz"
+      if curl -fsSL --max-time 120 "$node_url" -o /tmp/node22.tar.xz 2>/dev/null; then
+        tar -xJf /tmp/node22.tar.xz -C /usr/local --strip-components=1 >/dev/null 2>&1 \
+          && rm -f /tmp/node22.tar.xz \
+          && command -v node &>/dev/null \
+          && { _ok "Node.js (binary): $(node --version)"; return 0; }
+      fi
+      _err "All Node.js install methods failed"; return 1
       ;;
     dnf)
       _retry 3 5  bash -c "curl -fsSL https://rpm.nodesource.com/setup_22.x | bash - >/dev/null 2>&1"
@@ -391,10 +441,12 @@ _install_nodejs() {
       _retry 3 10 yum install -y nodejs
       ;;
     *)
-      export NVM_DIR="$HOME/.nvm"
-      _retry 3 10 bash -c "curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash"
+      # fallback: NVM برای سیستم‌های ناشناخته
+      export NVM_DIR="/root/.nvm"
+      _retry 3 10 bash -c "curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash >/dev/null 2>&1"
       [[ -f "$NVM_DIR/nvm.sh" ]] && source "$NVM_DIR/nvm.sh"
-      nvm install 22 && nvm use 22 && nvm alias default 22
+      nvm install 22 >/dev/null 2>&1 && nvm use 22 >/dev/null 2>&1 && nvm alias default 22 >/dev/null 2>&1 || true
+      ln -sf "$(which node 2>/dev/null)" /usr/local/bin/node 2>/dev/null || true
       ;;
   esac
   command -v node &>/dev/null || { _err "Node.js install failed"; return 1; }
